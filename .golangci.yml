@@ -1,0 +1,55 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - gocritic
+    - gosec
+    - misspell
+    - noctx
+    - nolintlint
+    - revive
+    - sqlclosecheck
+    - unconvert
+    - usestdlibvars
+    - wrapcheck
+  settings:
+    revive:
+      rules:
+        - name: exported
+        - name: package-comments
+    wrapcheck:
+      ignore-package-globs:
+        - github.com/zavisoft/search-engine/*
+  exclusions:
+    generated: strict
+    paths:
+      - web/
+      - tools/
+      - third_party/
+    presets:
+      - comments
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec, wrapcheck, errcheck]
+
+formatters:
+  exclusions:
+    paths:
+      - web/
+      - tools/
+      - third_party/
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/zavisoft/search-engine

@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: go1.27.3
+
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make tools
+      - name: Generated code is up to date
+        run: |
+          buf generate
+          sqlc generate
+          git diff --exit-code -- internal/gen internal/tenant/tenantdb
+      - run: make lint
+      - run: make test
+      - run: make build
+
+  integration:
+    runs-on: ubuntu-24.04
+    needs: go
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make test-integration
+
+  compose:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: make tools
+      - run: make up
+      - run: make migrate
+      - if: failure()
+        run: make ps && docker compose --project-directory . -f deploy/docker-compose.yml --env-file .env logs --tail=200
+      - if: always()
+        run: make nuke
+
+  python:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          version: "0.13.5"
+      - run: uv sync --frozen --group dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web/onboarding
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/onboarding/package-lock.json
+      - run: npm ci
+      - run: npm run gen:api && git diff --exit-code -- src/lib/api
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build

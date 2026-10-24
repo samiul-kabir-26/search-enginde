@@ -1,0 +1,60 @@
+[project]
+name = "search-engine-tools"
+version = "0.1.0"
+description = "Data prep, model export, training and offline eval for the search engine"
+requires-python = "==3.12.*"
+dependencies = [
+    "numpy==2.5.4",
+    "pandas==3.1.0",
+    "pyarrow==26.0.0",
+    "pyyaml==6.0.3",
+    "tqdm==4.70.1",
+]
+
+[dependency-groups]
+dataprep = [
+    "pillow==13.0.0",
+]
+models = [
+    "torch==2.14.1",
+    "transformers==5.20.2",
+    "onnx==1.23.2",
+    "onnxruntime==1.31.0",
+    "pillow==13.0.0",
+]
+training = [
+    "lightgbm==4.7.0",
+    "scikit-learn==1.9.1",
+    "onnx==1.23.2",
+    "onnxmltools==1.16.0",
+    "onnxruntime==1.31.0",
+    "clickhouse-connect==1.11.0",
+]
+eval = [
+    "requests==2.34.2",
+]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.17.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["dataprep", "training", "eval", "models"]

@@ -1,0 +1,29 @@
+# Local env
+.env
+!.env.example
+
+# Build output and dev tools
+/bin/
+/coverage.out
+/third_party/
+
+# Dataset (built by `make data`; ABO is CC BY-NC 4.0, never commit)
+/data/
+
+# Python
+__pycache__/
+*.pyc
+tools/.venv/
+.pytest_cache/
+.ruff_cache/
+
+# Model artifacts (exported by tools/models and tools/training)
+*.onnx
+deploy/triton/model_repository/*
+!deploy/triton/model_repository/.gitkeep
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store

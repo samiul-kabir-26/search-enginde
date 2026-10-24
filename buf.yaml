@@ -1,0 +1,4 @@
+version: v2
+modules:
+  - path: proto
+    # Vendored upstream KServe v2 (Open Inference Protocol) definitions; not linted.

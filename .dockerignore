@@ -1,0 +1,12 @@
+.git
+.env
+bin
+data
+third_party
+tools
+web
+loadtest
+docs
+**/node_modules
+**/.venv
+**/.next

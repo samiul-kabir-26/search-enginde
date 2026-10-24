@@ -1,0 +1,1606 @@
+openapi: 3.1.0
+info: {title: control-api, version: 0.1.0, description: 'Control plane: tenants, auth, onboarding, config versions, connections,
+    models, indexing, ads and playground.
+
+    Source of truth for REST contracts (see docs/API.md).'}
+servers:
+- {url: 'http://localhost:8081'}
+security:
+- bearer: []
+tags:
+- {name: access}
+- {name: ads}
+- {name: auth}
+- {name: config}
+- {name: connections}
+- {name: indexing}
+- {name: models}
+- {name: onboarding}
+- {name: ops}
+- {name: playground}
+paths:
+  /v1/signup:
+    post:
+      operationId: signup
+      tags: [auth]
+      summary: Create tenant and owner user; seeds draft config and onboarding state
+      parameters:
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SignupRequest'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/auth/login:
+    post:
+      operationId: login
+      tags: [auth]
+      summary: Log in with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LoginRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/auth/token:
+    post:
+      operationId: exchangeApiKey
+      tags: [auth]
+      summary: Exchange a tenant API key for a JWT
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/TokenRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/TokenResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /.well-known/jwks.json:
+    get:
+      operationId: jwks
+      tags: [auth]
+      summary: JSON Web Key Set used by search-api
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/JWKS'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/api-keys:
+    get:
+      operationId: listApiKeys
+      tags: [access]
+      summary: List API keys
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ApiKey'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+    post:
+      operationId: createApiKey
+      tags: [access]
+      summary: Create an API key (secret shown once)
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ApiKeyCreate'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiKeyCreated'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/api-keys/{key_id}:
+    delete:
+      operationId: revokeApiKey
+      tags: [access]
+      summary: Revoke an API key
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: key_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/users:
+    get:
+      operationId: listUsers
+      tags: [access]
+      summary: List users
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/User'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+    post:
+      operationId: createUser
+      tags: [access]
+      summary: Invite a user
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserCreate'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/users/{user_id}:
+    get:
+      operationId: getUser
+      tags: [access]
+      summary: Get a user
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    patch:
+      operationId: updateUser
+      tags: [access]
+      summary: Change a user's role
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserUpdate'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: deleteUser
+      tags: [access]
+      summary: Remove a user
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: user_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/onboarding:
+    get:
+      operationId: getOnboarding
+      tags: [onboarding]
+      summary: Current step, completed steps, blockers
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OnboardingState'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/onboarding/steps/{step}:
+    put:
+      operationId: saveOnboardingStep
+      tags: [onboarding]
+      summary: Save a step payload into the draft and validate it
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: step
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/OnboardingStep'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StepPayload'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/StepResult'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/onboarding/engine-explainer:
+    get:
+      operationId: getEngineExplainer
+      tags: [onboarding]
+      summary: Static stage descriptions, configurable options and defaults
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EngineExplainer'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/engine-explainer:
+    get:
+      operationId: getTenantEngineExplainer
+      tags: [onboarding]
+      summary: Engine explainer overlaid with the tenant's draft choices
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/EngineExplainer'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/draft:
+    get:
+      operationId: getConfigDraft
+      tags: [config]
+      summary: Get the draft config
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigDocument'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    put:
+      operationId: putConfigDraft
+      tags: [config]
+      summary: Replace the draft config
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConfigDocument'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigDocument'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/draft/validate:
+    post:
+      operationId: validateConfigDraft
+      tags: [config]
+      summary: Validate the draft and return every error
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ValidationResult'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/versions:
+    post:
+      operationId: publishConfig
+      tags: [config]
+      summary: Publish the draft as a new immutable version
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigVersion'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    get:
+      operationId: listConfigVersions
+      tags: [config]
+      summary: List config versions
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/ConfigVersionSummary'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/versions/{v}:
+    get:
+      operationId: getConfigVersion
+      tags: [config]
+      summary: Get a config version
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: v
+        in: path
+        required: true
+        schema: {type: integer}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigVersion'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/versions/{v}/activate:
+    post:
+      operationId: activateConfigVersion
+      tags: [config]
+      summary: Activate a version (rollback = activate an older one)
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: v
+        in: path
+        required: true
+        schema: {type: integer}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigVersionSummary'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/versions/{v}/shadow:
+    post:
+      operationId: shadowConfigVersion
+      tags: [config]
+      summary: Run a version in shadow on sampled traffic
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: v
+        in: path
+        required: true
+        schema: {type: integer}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ShadowRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigVersionSummary'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/config/diff:
+    get:
+      operationId: diffConfigVersions
+      tags: [config]
+      summary: Diff two config versions
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: from
+        in: query
+        required: true
+        schema: {type: integer}
+      - name: to
+        in: query
+        required: true
+        schema: {type: integer}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConfigDiff'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/secrets:
+    post:
+      operationId: createSecret
+      tags: [connections]
+      summary: Store a secret; the value is never readable again
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SecretCreate'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SecretRef'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/connections:
+    get:
+      operationId: listConnections
+      tags: [connections]
+      summary: List connections
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Connection'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+    post:
+      operationId: createConnection
+      tags: [connections]
+      summary: Create a vector store or lexical connection
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionInput'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/connections/{connection_id}:
+    get:
+      operationId: getConnection
+      tags: [connections]
+      summary: Get a connection
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: connection_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    put:
+      operationId: updateConnection
+      tags: [connections]
+      summary: Update a connection
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: connection_id
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionInput'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Connection'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: deleteConnection
+      tags: [connections]
+      summary: Delete a connection
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: connection_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/connections/{connection_id}/test:
+    post:
+      operationId: testConnection
+      tags: [connections]
+      summary: Health, collection exists, dims and metric match, sample query latency
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: connection_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ConnectionTestResult'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/models:
+    post:
+      operationId: registerModel
+      tags: [models]
+      summary: Register a remote model or an uploaded ONNX artifact
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ModelInput'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Model'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/models/uploads:
+    post:
+      operationId: createModelUpload
+      tags: [models]
+      summary: Presigned S3 PUT for an ONNX artifact
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UploadRequest'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PresignedUpload'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/models/{model_id}/validate:
+    post:
+      operationId: validateModel
+      tags: [models]
+      summary: Dry-run inference with probe inputs
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: model_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ModelValidation'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/platform/models:
+    get:
+      operationId: listPlatformModels
+      tags: [models]
+      summary: Catalog of platform pre-trained models
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/PlatformModel'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/index/jobs:
+    post:
+      operationId: createIndexJob
+      tags: [indexing]
+      summary: 'Backfill for a config version: build v{n+1}, then swap the alias'
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/IndexJobCreate'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IndexJob'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/index/jobs/{job_id}:
+    get:
+      operationId: getIndexJob
+      tags: [indexing]
+      summary: Index job progress
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: job_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IndexJob'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/catalog/uploads:
+    post:
+      operationId: createCatalogUpload
+      tags: [indexing]
+      summary: Presigned upload for JSONL/CSV batch ingestion
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UploadRequest'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PresignedUpload'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/catalog/mapping/preview:
+    post:
+      operationId: previewCatalogMapping
+      tags: [indexing]
+      summary: Apply a field mapping to a sample payload
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MappingPreviewRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/MappingPreviewResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/ads/campaigns:
+    get:
+      operationId: listCampaigns
+      tags: [ads]
+      summary: List campaigns
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Campaign'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+    post:
+      operationId: createCampaign
+      tags: [ads]
+      summary: Create a campaign
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CampaignInput'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Campaign'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/ads/campaigns/{campaign_id}:
+    get:
+      operationId: getCampaign
+      tags: [ads]
+      summary: Get a campaign
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Campaign'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    put:
+      operationId: updateCampaign
+      tags: [ads]
+      summary: Update a campaign
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CampaignInput'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Campaign'}
+        4XX: {$ref: '#/components/responses/Problem'}
+    delete:
+      operationId: deleteCampaign
+      tags: [ads]
+      summary: Delete a campaign
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/ads/campaigns/{campaign_id}/creatives:
+    get:
+      operationId: listCreatives
+      tags: [ads]
+      summary: List creatives
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Cursor'}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Creative'}
+                  next_cursor:
+                    type: [string, 'null']
+        4XX: {$ref: '#/components/responses/Problem'}
+    post:
+      operationId: createCreative
+      tags: [ads]
+      summary: Add a product creative
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreativeInput'}
+      responses:
+        '201':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Creative'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/ads/campaigns/{campaign_id}/creatives/{creative_id}:
+    delete:
+      operationId: deleteCreative
+      tags: [ads]
+      summary: Remove a creative
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: campaign_id
+        in: path
+        required: true
+        schema: {type: string}
+      - name: creative_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/ads/reports:
+    get:
+      operationId: getAdsReport
+      tags: [ads]
+      summary: Impressions, clicks, spend, CTR
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: from
+        in: query
+        required: true
+        schema: {type: string, format: date}
+      - name: to
+        in: query
+        required: true
+        schema: {type: string, format: date}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AdsReport'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/playground/search:
+    post:
+      operationId: playgroundSearch
+      tags: [playground]
+      summary: Run search against the draft or a version with explain=true
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlaygroundRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlaygroundResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /healthz:
+    get:
+      operationId: healthz
+      tags: [ops]
+      summary: Liveness probe
+      security: []
+      responses:
+        '200': {description: Process is live}
+  /readyz:
+    get:
+      operationId: readyz
+      tags: [ops]
+      summary: Readiness probe
+      security: []
+      responses:
+        '200': {description: Dependencies ready}
+        '503': {$ref: '#/components/responses/Problem'}
+  /metrics:
+    get:
+      operationId: metrics
+      tags: [ops]
+      summary: Prometheus metrics
+      security: []
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            text/plain:
+              schema: {type: string}
+components:
+  securitySchemes:
+    bearer: {type: http, scheme: bearer, bearerFormat: JWT (EdDSA)}
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Stored for 24 h.
+      schema: {type: string, maxLength: 255}
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: {type: string}
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+  responses:
+    Problem:
+      description: RFC 9457 problem details
+      content:
+        application/problem+json:
+          schema: {$ref: '#/components/schemas/Problem'}
+  schemas:
+    Problem:
+      type: object
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+      required: [type, title, status]
+    FieldError:
+      type: object
+      properties:
+        path: {type: string, description: JSON Pointer}
+        code: {type: string}
+        message: {type: string}
+      required: [path, code, message]
+    SignupRequest:
+      type: object
+      properties:
+        company_name: {type: string}
+        slug: {type: string, pattern: '^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'}
+        region: {type: string}
+        plan: {type: string}
+        email: {type: string, format: email}
+        password: {type: string, minLength: 12}
+      required: [company_name, slug, region, plan, email, password]
+    LoginRequest:
+      type: object
+      properties:
+        tenant_slug: {type: string}
+        email: {type: string, format: email}
+        password: {type: string}
+      required: [email, password]
+    SessionResponse:
+      type: object
+      properties:
+        token: {type: string}
+        tenant_id: {type: string}
+        user_id: {type: string}
+        expires_at: {type: string, format: date-time}
+      required: [token, tenant_id, expires_at]
+    TokenRequest:
+      type: object
+      properties:
+        api_key: {type: string}
+      required: [api_key]
+    TokenResponse:
+      type: object
+      properties:
+        access_token: {type: string}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer}
+      required: [access_token, token_type, expires_in]
+    JWKS:
+      type: object
+      properties:
+        keys:
+          type: array
+          items: {type: object, additionalProperties: true}
+      required: [keys]
+    Scope:
+      type: string
+      enum: ['search:read', 'search:debug', 'events:write']
+    ApiKeyCreate:
+      type: object
+      properties:
+        name: {type: string}
+        scopes:
+          type: array
+          items: {$ref: '#/components/schemas/Scope'}
+      required: [name, scopes]
+    ApiKey:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        prefix: {type: string}
+        scopes:
+          type: array
+          items: {$ref: '#/components/schemas/Scope'}
+        created_at: {type: string, format: date-time}
+        last_used_at:
+          type: [string, 'null']
+          format: date-time
+        revoked_at:
+          type: [string, 'null']
+          format: date-time
+      required: [id, prefix, scopes, created_at]
+    ApiKeyCreated:
+      allOf:
+      - {$ref: '#/components/schemas/ApiKey'}
+      - type: object
+        properties:
+          secret: {type: string, description: Shown once.}
+        required: [secret]
+    Role:
+      type: string
+      enum: [owner, admin, developer, viewer]
+    User:
+      type: object
+      properties:
+        id: {type: string}
+        email: {type: string, format: email}
+        role: {$ref: '#/components/schemas/Role'}
+        created_at: {type: string, format: date-time}
+      required: [id, email, role]
+    UserCreate:
+      type: object
+      properties:
+        email: {type: string, format: email}
+        role: {$ref: '#/components/schemas/Role'}
+      required: [email, role]
+    UserUpdate:
+      type: object
+      properties:
+        role: {$ref: '#/components/schemas/Role'}
+      required: [role]
+    OnboardingStep:
+      type: string
+      enum: [account, engine_tour, catalog, retrieval, policies, ranking, personalization, index_build, playground, go_live]
+    OnboardingState:
+      type: object
+      properties:
+        current_step: {$ref: '#/components/schemas/OnboardingStep'}
+        completed_steps:
+          type: array
+          items: {$ref: '#/components/schemas/OnboardingStep'}
+        blockers:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+      required: [current_step, completed_steps]
+    StepPayload: {type: object, description: Step-specific payload (docs/ONBOARDING.md §4). Skeleton; the full schema is defined
+        in the milestone that implements this endpoint., additionalProperties: true}
+    StepResult:
+      type: object
+      properties:
+        valid: {type: boolean}
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+        warnings:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+        next_step: {$ref: '#/components/schemas/OnboardingStep'}
+      required: [valid]
+    EngineExplainer:
+      type: object
+      properties:
+        stages:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              title: {type: string}
+              description: {type: string}
+              configurable:
+                type: array
+                items: {type: string}
+              default: {type: string}
+              current:
+                type: string
+                enum: [default, custom]
+              wizard_step: {$ref: '#/components/schemas/OnboardingStep'}
+            required: [id, title, description]
+      required: [stages]
+    ConfigDocument:
+      type: object
+      description: Tenant pipeline config, schema_version 1 (docs/TENANT_CONFIG.md §3). Skeleton; the full schema is defined
+        in the milestone that implements this endpoint.
+      required: [schema_version]
+      properties:
+        schema_version: {type: integer, const: 1}
+      additionalProperties: true
+    ValidationResult:
+      type: object
+      properties:
+        valid: {type: boolean}
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+      required: [valid, errors]
+    ConfigVersionState:
+      type: string
+      enum: [published, active, shadow, retired]
+    ConfigVersionSummary:
+      type: object
+      properties:
+        version: {type: integer}
+        state: {$ref: '#/components/schemas/ConfigVersionState'}
+        created_at: {type: string, format: date-time}
+        created_by: {type: string}
+      required: [version, state, created_at]
+    ConfigVersion:
+      allOf:
+      - {$ref: '#/components/schemas/ConfigVersionSummary'}
+      - type: object
+        properties:
+          document: {$ref: '#/components/schemas/ConfigDocument'}
+        required: [document]
+    ShadowRequest:
+      type: object
+      properties:
+        sample_rate: {type: number, minimum: 0, maximum: 0.2}
+      required: [sample_rate]
+    ConfigDiff:
+      type: object
+      properties:
+        from: {type: integer}
+        to: {type: integer}
+        changes:
+          type: array
+          items:
+            type: object
+            properties:
+              op:
+                type: string
+                enum: [add, remove, replace]
+              path: {type: string}
+              old: {}
+              new: {}
+            required: [op, path]
+      required: [from, to, changes]
+    SecretCreate:
+      type: object
+      properties:
+        kind: {type: string}
+        value: {type: string, writeOnly: true}
+      required: [kind, value]
+    SecretRef:
+      type: object
+      properties:
+        secret_ref: {type: string}
+      required: [secret_ref]
+    ConnectionInput:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [vector_store, lexical]
+        type:
+          type: string
+          enum: [qdrant, pgvector, milvus, opensearch]
+        endpoint: {type: string, format: uri}
+        secret_ref: {type: string}
+        settings: {type: object, additionalProperties: true}
+      required: [kind, type, endpoint]
+    Connection:
+      allOf:
+      - {$ref: '#/components/schemas/ConnectionInput'}
+      - type: object
+        properties:
+          id: {type: string}
+          status: {type: string}
+          last_tested_at:
+            type: [string, 'null']
+            format: date-time
+          last_error:
+            type: [string, 'null']
+        required: [id, status]
+    ConnectionTestResult:
+      type: object
+      properties:
+        ok: {type: boolean}
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              ok: {type: boolean}
+              message: {type: string}
+              latency_ms: {type: number}
+            required: [name, ok]
+      required: [ok, checks]
+    ModelInput:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [embedder, prerank, rank, rerank]
+        type:
+          type: string
+          enum: [onnx, kserve_v2, openai_embeddings]
+        name: {type: string}
+        version: {type: string}
+        endpoint: {type: string, format: uri}
+        artifact_uri: {type: string}
+        secret_ref: {type: string}
+        supports_text_to_image: {type: boolean}
+        max_batch_size: {type: integer}
+        input_schema: {type: object, additionalProperties: true}
+        output_schema: {type: object, additionalProperties: true}
+      required: [kind, type, name, version, input_schema, output_schema]
+    Model:
+      allOf:
+      - {$ref: '#/components/schemas/ModelInput'}
+      - type: object
+        properties:
+          id: {type: string}
+          status: {type: string}
+          artifact_sha256: {type: string}
+          validated_at:
+            type: [string, 'null']
+            format: date-time
+        required: [id, status]
+    ModelValidation:
+      type: object
+      properties:
+        ok: {type: boolean}
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string}
+              ok: {type: boolean}
+              message: {type: string}
+            required: [name, ok]
+        latency_ms: {type: number}
+      required: [ok, checks]
+    PlatformModel:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string}
+        dim: {type: integer}
+        description: {type: string}
+      required: [id, kind]
+    UploadRequest:
+      type: object
+      properties:
+        filename: {type: string}
+        size_bytes: {type: integer}
+        content_type: {type: string}
+      required: [filename, size_bytes]
+    PresignedUpload:
+      type: object
+      properties:
+        url: {type: string}
+        method: {type: string, const: PUT}
+        headers:
+          type: object
+          additionalProperties: {type: string}
+        expires_at: {type: string, format: date-time}
+        object_uri: {type: string}
+      required: [url, method, expires_at, object_uri]
+    IndexJobCreate:
+      type: object
+      properties:
+        config_version: {type: integer}
+      required: [config_version]
+    IndexJob:
+      type: object
+      properties:
+        id: {type: string}
+        config_version: {type: integer}
+        status: {type: string}
+        total: {type: integer}
+        done: {type: integer}
+        failed: {type: integer}
+        started_at:
+          type: [string, 'null']
+          format: date-time
+        finished_at:
+          type: [string, 'null']
+          format: date-time
+        error:
+          type: [string, 'null']
+      required: [id, config_version, status, total, done, failed]
+    MappingPreviewRequest:
+      type: object
+      properties:
+        sample: {type: object, additionalProperties: true}
+        field_mapping:
+          type: object
+          additionalProperties: {type: string, description: JSONPath}
+      required: [sample, field_mapping]
+    MappingPreviewResponse:
+      type: object
+      properties:
+        valid: {type: boolean}
+        product: {type: object, additionalProperties: true}
+        errors:
+          type: array
+          items: {$ref: '#/components/schemas/FieldError'}
+      required: [valid]
+    CampaignInput:
+      type: object
+      properties:
+        vendor_id: {type: string}
+        status: {type: string}
+        daily_budget_minor: {type: integer, format: int64}
+        currency: {type: string}
+        bid_minor: {type: integer, format: int64}
+        targeting: {type: object, additionalProperties: true}
+        start_at: {type: string, format: date-time}
+        end_at:
+          type: [string, 'null']
+          format: date-time
+      required: [vendor_id, daily_budget_minor, currency, bid_minor, start_at]
+    Campaign:
+      allOf:
+      - {$ref: '#/components/schemas/CampaignInput'}
+      - type: object
+        properties:
+          id: {type: string}
+        required: [id]
+    CreativeInput:
+      type: object
+      properties:
+        product_id: {type: string}
+      required: [product_id]
+    Creative:
+      allOf:
+      - {$ref: '#/components/schemas/CreativeInput'}
+      - type: object
+        properties:
+          id: {type: string}
+          campaign_id: {type: string}
+        required: [id, campaign_id]
+    AdsReport:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              campaign_id: {type: string}
+              impressions: {type: integer}
+              clicks: {type: integer}
+              spend_minor: {type: integer, format: int64}
+              ctr: {type: number}
+            required: [campaign_id, impressions, clicks, spend_minor, ctr]
+      required: [rows]
+    PlaygroundRequest:
+      type: object
+      properties:
+        query_type:
+          type: string
+          enum: [text, image, similar]
+        target: {type: string, description: draft or a version number}
+        q: {type: string}
+        image_base64: {type: string}
+        product_id: {type: string}
+        filters: {type: object, additionalProperties: true}
+      required: [query_type]
+    PlaygroundResponse: {type: object, description: search-api SearchResponse with the explain trace. Skeleton; the full schema
+        is defined in the milestone that implements this endpoint., additionalProperties: true}

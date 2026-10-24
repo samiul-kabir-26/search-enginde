@@ -1,0 +1,12 @@
+DROP TABLE IF EXISTS ad_creatives;
+DROP TABLE IF EXISTS ad_campaigns;
+DROP TABLE IF EXISTS index_jobs;
+DROP TABLE IF EXISTS onboarding_state;
+DROP TABLE IF EXISTS tenant_connections;
+DROP TABLE IF EXISTS tenant_models;
+DROP TABLE IF EXISTS tenant_secrets;
+DROP TABLE IF EXISTS tenant_config_versions;
+DROP TABLE IF EXISTS tenant_config_drafts;
+DROP TABLE IF EXISTS tenant_api_keys;
+DROP TABLE IF EXISTS tenant_users;
+DROP TABLE IF EXISTS tenants;

@@ -1,0 +1,242 @@
+name: search-engine
+
+# `make up` starts the infrastructure, waits for health, then runs the one-shot
+# `init` profile jobs (Kafka topics, S3 buckets).
+# Profiles: `init`, `models` (Triton), `obs` (OTel collector, Jaeger, Prometheus,
+# Grafana), `apps` (Go services + nginx).
+
+x-healthcheck: &healthcheck
+  interval: 5s
+  timeout: 5s
+  retries: 30
+  start_period: 10s
+
+services:
+  mysql:
+    image: mysql:8.4.13
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_ai_ci"]
+    ports: ["${MYSQL_HOST_PORT}:3306"]
+    volumes: [mysql-data:/var/lib/mysql]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p$$MYSQL_ROOT_PASSWORD --silent"]
+
+  redis:
+    image: redis:7.4.11-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["${REDIS_HOST_PORT}:6379"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "redis-cli", "ping"]
+
+  opensearch:
+    image: opensearchproject/opensearch:3.9.0
+    environment:
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms${OPENSEARCH_HEAP} -Xmx${OPENSEARCH_HEAP}
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+      nofile: { soft: 65536, hard: 65536 }
+    ports: ["${OPENSEARCH_HOST_PORT}:9200"]
+    volumes: [opensearch-data:/usr/share/opensearch/data]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "curl -fs 'http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=4s' >/dev/null"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "${QDRANT_HTTP_HOST_PORT}:6333"
+      - "${QDRANT_GRPC_HOST_PORT}:6334"
+    volumes: [qdrant-data:/qdrant/storage]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /readyz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'"]
+
+  redpanda:
+    image: redpandadata/redpanda:v26.2.6
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:${KAFKA_HOST_PORT}
+      - --rpc-addr=redpanda:33145
+      - --advertise-rpc-addr=redpanda:33145
+    ports:
+      - "${KAFKA_HOST_PORT}:19092"
+      - "${REDPANDA_ADMIN_HOST_PORT}:9644"
+    volumes: [redpanda-data:/var/lib/redpanda/data]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+
+  redpanda-init:
+    profiles: [init]
+    image: redpandadata/redpanda:v26.2.6
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_EVENTS}; do
+          rpk topic create "$$t" -p 6 -r 1 -X brokers=redpanda:9092 || rpk topic describe "$$t" -X brokers=redpanda:9092 >/dev/null
+        done
+    restart: "no"
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.34.13-alpine
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    ports:
+      - "${CLICKHOUSE_HTTP_HOST_PORT}:8123"
+      - "${CLICKHOUSE_NATIVE_HOST_PORT}:9000"
+    volumes: [clickhouse-data:/var/lib/clickhouse]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8123/ping"]
+
+  minio:
+    build: ./deploy/minio
+    image: search-engine/minio:RELEASE.2025-10-15T17-29-55Z
+    command: ["minio", "server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    ports:
+      - "${MINIO_API_HOST_PORT}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT}:9001"
+    volumes: [minio-data:/data]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:9000/minio/health/ready"]
+
+  minio-init:
+    profiles: [init]
+    image: search-engine/minio:RELEASE.2025-10-15T17-29-55Z
+    pull_policy: never
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 "${S3_ACCESS_KEY}" "${S3_SECRET_KEY}"
+        for b in ${S3_BUCKET_IMAGES} ${S3_BUCKET_MODELS} ${S3_BUCKET_UPLOADS}; do mc mb -p "local/$$b"; done
+        mc anonymous set download "local/${S3_BUCKET_IMAGES}"
+    restart: "no"
+
+  triton:
+    profiles: [models]
+    build: ./deploy/triton
+    image: search-engine/triton:26.09
+    command:
+      - tritonserver
+      - --model-repository=/models
+      - --strict-readiness=false
+      - --log-verbose=0
+    ports:
+      - "${TRITON_HTTP_HOST_PORT}:8000"
+      - "${TRITON_GRPC_HOST_PORT}:8001"
+      - "${TRITON_METRICS_HOST_PORT}:8002"
+    volumes: ["./deploy/triton/model_repository:/models:ro"]
+    shm_size: 1g
+    healthcheck:
+      <<: *healthcheck
+      start_period: 60s
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8000/v2/health/live"]
+
+  otel-collector:
+    profiles: [obs]
+    image: otel/opentelemetry-collector-contrib:0.163.2
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes: ["./deploy/otel/collector.yaml:/etc/otelcol/config.yaml:ro"]
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    depends_on: [jaeger]
+
+  jaeger:
+    profiles: [obs]
+    image: jaegertracing/jaeger:2.22.0
+    ports: ["16686:16686"]
+
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v3.15.1
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--web.enable-remote-write-receiver"]
+    volumes: ["./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"]
+    ports: ["9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+
+  grafana:
+    profiles: [obs]
+    image: grafana/grafana:13.2.4
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes: ["./deploy/grafana/provisioning:/etc/grafana/provisioning:ro"]
+    ports: ["3001:3000"]
+    depends_on: [prometheus]
+
+  search-api:
+    profiles: [apps]
+    build: { context: ., dockerfile: deploy/Dockerfile, args: { SERVICE: search-api } }
+    image: search-engine/search-api:dev
+    env_file: [.env]
+    environment: &app-env
+      MYSQL_DSN: ${MYSQL_USER}:${MYSQL_PASSWORD}@tcp(mysql:3306)/${MYSQL_DATABASE}?parseTime=true
+      REDIS_ADDR: redis:6379
+      OPENSEARCH_URL: http://opensearch:9200
+      QDRANT_ADDR: qdrant:6334
+      KAFKA_BROKERS: redpanda:9092
+      CLICKHOUSE_ADDR: clickhouse:9000
+      TRITON_GRPC_ADDR: triton:8001
+      S3_ENDPOINT: http://minio:9000
+      JWKS_URL: http://control-api:8081/.well-known/jwks.json
+    depends_on: &app-deps
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["8080:8080"]
+
+  control-api:
+    profiles: [apps]
+    build: { context: ., dockerfile: deploy/Dockerfile, args: { SERVICE: control-api } }
+    image: search-engine/control-api:dev
+    env_file: [.env]
+    environment: *app-env
+    depends_on: *app-deps
+    ports: ["8081:8081"]
+
+  nginx:
+    profiles: [apps]
+    image: nginx:1.31.8-alpine
+    volumes: ["./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro"]
+    ports: ["8088:80"]
+    depends_on: [search-api, control-api]
+
+volumes:
+  mysql-data:
+  redis-data:
+  opensearch-data:
+  qdrant-data:
+  redpanda-data:
+  clickhouse-data:
+  minio-data:
