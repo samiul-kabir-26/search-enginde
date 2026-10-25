@@ -115,3 +115,105 @@ func (s *Store) Create(ctx context.Context, nt NewTenant) (ID, error) {
 	}
 	return id, nil
 }
+
+// Plan is a plan's limits (PLAN.md R3).
+type Plan struct {
+	ID              string
+	Name            string
+	MaxTotalMS      int
+	SearchRPS       int
+	SearchBurst     int
+	EventsRPS       int
+	BYOAllowed      bool
+	EgressAllowlist []string
+	MaxCustomFields int
+	MaxPageDepth    int
+}
+
+// Plan loads a plan by ID.
+func (s *Store) Plan(ctx context.Context, id string) (Plan, error) {
+	row, err := s.q.GetPlan(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Plan{}, fmt.Errorf("plan %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Plan{}, fmt.Errorf("plan %q: %w", id, err)
+	}
+	var allow []string
+	if err := json.Unmarshal(row.EgressAllowlist, &allow); err != nil {
+		return Plan{}, fmt.Errorf("plan %q egress_allowlist: %w", id, err)
+	}
+	return Plan{
+		ID: row.ID, Name: row.Name, MaxTotalMS: int(row.MaxTotalMs), SearchRPS: int(row.SearchRps),
+		SearchBurst: int(row.SearchBurst), EventsRPS: int(row.EventsRps), BYOAllowed: row.ByoAllowed,
+		EgressAllowlist: allow, MaxCustomFields: int(row.MaxCustomFields), MaxPageDepth: int(row.MaxPageDepth),
+	}, nil
+}
+
+// Tenant loads a tenant by ID.
+func (s *Store) Tenant(ctx context.Context, id ID) (Tenant, error) {
+	row, err := s.q.GetTenant(ctx, string(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Tenant{}, fmt.Errorf("tenant %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return Tenant{}, fmt.Errorf("tenant %s: %w", id, err)
+	}
+	return Tenant{ID: ID(row.ID), Slug: row.Slug, Name: row.Name, Plan: row.Plan, Status: row.Status}, nil
+}
+
+// APIKey is a stored tenant API key; the secret itself is never stored, only its hash.
+type APIKey struct {
+	ID       string
+	TenantID ID
+	Prefix   string
+	Hash     []byte
+	Scopes   []string
+}
+
+// CreateAPIKey stores a key's prefix, hash and scopes.
+func (s *Store) CreateAPIKey(ctx context.Context, k APIKey) error {
+	scopes, err := json.Marshal(k.Scopes)
+	if err != nil {
+		return fmt.Errorf("api key scopes: %w", err)
+	}
+	if err := s.q.CreateAPIKey(ctx, tenantdb.CreateAPIKeyParams{
+		ID: k.ID, TenantID: string(k.TenantID), Prefix: k.Prefix, Hash: k.Hash, Scopes: scopes,
+	}); err != nil {
+		return fmt.Errorf("create api key: %w", err)
+	}
+	return nil
+}
+
+// APIKeyByPrefix returns the active key with this prefix.
+func (s *Store) APIKeyByPrefix(ctx context.Context, prefix string) (APIKey, error) {
+	row, err := s.q.GetAPIKeyByPrefix(ctx, prefix)
+	if errors.Is(err, sql.ErrNoRows) {
+		return APIKey{}, fmt.Errorf("api key: %w", ErrNotFound)
+	}
+	if err != nil {
+		return APIKey{}, fmt.Errorf("api key: %w", err)
+	}
+	var scopes []string
+	if err := json.Unmarshal(row.Scopes, &scopes); err != nil {
+		return APIKey{}, fmt.Errorf("api key scopes: %w", err)
+	}
+	return APIKey{ID: row.ID, TenantID: ID(row.TenantID), Prefix: row.Prefix, Hash: row.Hash, Scopes: scopes}, nil
+}
+
+// TouchAPIKey records a key's last use.
+func (s *Store) TouchAPIKey(ctx context.Context, id string) error {
+	if err := s.q.TouchAPIKey(ctx, id); err != nil {
+		return fmt.Errorf("touch api key: %w", err)
+	}
+	return nil
+}
+
+// CountActiveAPIKeys counts a tenant's unrevoked keys.
+func (s *Store) CountActiveAPIKeys(ctx context.Context, id ID) (int, error) {
+	n, err := s.q.CountActiveAPIKeys(ctx, string(id))
+	if err != nil {
+		return 0, fmt.Errorf("count api keys: %w", err)
+	}
+	return int(n), nil
+}

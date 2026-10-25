@@ -6,5 +6,8 @@ input [
   { name: "attention_mask", data_type: TYPE_INT64, dims: [ -1 ] }
 ]
 output [ { name: "EMBEDDING", data_type: TYPE_FP32, dims: [ 512 ] } ]
-instance_group [ { kind: KIND_CPU, count: 1 } ]
+instance_group [ { kind: KIND_CPU, count: 2 } ]
 dynamic_batching { max_queue_delay_microseconds: 2000 }
+# Query-time text encoders run concurrently; capping ONNX Runtime threads avoids oversubscribing the CPU.
+parameters { key: "intra_op_thread_count", value: { string_value: "2" } }
+parameters { key: "inter_op_thread_count", value: { string_value: "1" } }

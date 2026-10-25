@@ -1,4 +1,6 @@
-"""Tokenize UTF-8 text, padding to the longest item in the request and truncating at max_length.
+"""Tokenize UTF-8 text, padding to the longest item in the request (rounded up to a multiple of
+16 tokens, so requests of similar length share a shape and the encoder's dynamic batcher can merge
+them) and truncating at max_length.
 
 Shared by clip_text_pre and bge_text_pre; the tokenizer comes from ./assets and max_length from
 the model config.
@@ -10,6 +12,8 @@ from pathlib import Path
 import numpy as np
 import triton_python_backend_utils as pb_utils
 from transformers import AutoTokenizer
+
+PAD_MULTIPLE = 16
 
 
 class TritonPythonModel:
@@ -32,6 +36,7 @@ class TritonPythonModel:
             enc = self.tokenizer(
                 texts,
                 padding=True,
+                pad_to_multiple_of=PAD_MULTIPLE,
                 truncation=True,
                 max_length=self.max_length,
                 return_tensors="np",

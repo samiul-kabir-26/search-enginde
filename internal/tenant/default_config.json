@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "locale": "en",
-  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 80, "s3_ms": 10, "s4_ms": 15, "s5_ms": 80, "s6_ms": 30 },
+  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 120, "s3_ms": 10, "s4_ms": 15, "s5_ms": 40, "s6_ms": 30 },
 
   "catalog": {
     "ingestion": "events",

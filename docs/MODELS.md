@@ -49,7 +49,7 @@ Pooling and L2 normalization are part of each exported graph, and the Hugging Fa
 | `clip_text` | `clip_text_pre`: tokenizer, max 77 tokens | `clip_text_encoder` → `[N, 512]` |
 | `bge_text` | `bge_text_pre`: tokenizer, max 512 tokens | `bge_encoder` (CLS pooling) → `[N, 384]` |
 
-Ensembles and preprocessors take `[N]` BYTES exactly as in §1 (`max_batch_size: 0`). The ONNX models batch dynamically (`max_batch_size: 64`). Text is padded to the longest item in a request, so only same-length requests merge. An undecodable image fails its request with `INVALID_ARG`; the indexer then embeds that batch one image at a time and indexes the bad product without an image vector. `make models-smoke` checks shapes, norms and a text→image sanity case.
+Ensembles and preprocessors take `[N]` BYTES exactly as in §1 (`max_batch_size: 0`). The ONNX models batch dynamically (`max_batch_size: 64`). Text is padded to the longest item in a request rounded up to a multiple of 16 tokens, so queries of similar length share a shape and merge in the batcher; `clip_text_pre` truncates at 64 tokens (CLIP has 77 positions). The query-time text encoders run two instances each with 2 intra-op threads: more threads oversubscribe the CPU when CLIP and BGE run concurrently, which pushed S1 past its 40 ms budget under load. An undecodable image fails its request with `INVALID_ARG`; the indexer then embeds that batch one image at a time and indexes the bad product without an image vector. `make models-smoke` checks shapes, norms and a text→image sanity case.
 
 **Runtime.** Use the CPU instance group in dev, and configure dynamic batching (`max_queue_delay_microseconds` ≈ 2000). Pin the Triton image tag; the Python backend dependencies are installed into a custom image built in `deploy/triton/Dockerfile`.
 
@@ -66,6 +66,8 @@ Scorers declare an ordered list of feature names; the engine builds the `[N, F]`
 | `vendor_score`, `vendor_on_time_dispatch_rate`, `vendor_dispute_rate`, `vendor_response_hours`, `vendor_verified` | Redis vendor features |
 | `query_category_match` | S1 predicted categories ∩ item categories |
 | `user_category_affinity`, `user_price_band_match` | Redis user features (re-rank only) |
+
+Features are normalized per request to keep linear weights comparable: `rrf_score` and `bm25_norm` divide by the request maximum, `rating` by 5, `price_minor_log` = ln(1 + price/100)/10, `rating_count_log` = ln(1 + count)/10, `image_count` = min(n, 10)/10, `age_days` = days/730 (capped at 1). Declared defaults for missing values live in `internal/pipeline/feature`.
 
 CTR and CVR are position-debiased using the examination propensity per position, estimated by `featurejob` from synthetic randomized-slot traffic (see `docs/DATA.md` §5).
 

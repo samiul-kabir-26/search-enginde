@@ -44,3 +44,23 @@ func TestID(t *testing.T) {
 		t.Errorf("ResourcePrefix = %s", p)
 	}
 }
+
+func TestSchemaMigrationHook(t *testing.T) {
+	saved := migrations
+	defer func() { migrations = saved }()
+	migrations = map[int]func(map[string]any) error{}
+	doc := strings.Replace(string(DefaultDocument()), `"schema_version": 1`, `"schema_version": 0`, 1)
+	if _, err := ParseConfig([]byte(doc)); err == nil {
+		t.Error("schema_version 0 is below the supported range")
+	}
+	// A current document passes through untouched; a future one is rejected.
+	if _, err := migrate(DefaultDocument()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := migrate([]byte(`{"schema_version": 99}`)); err == nil {
+		t.Error("a future schema_version must be rejected")
+	}
+	if _, err := migrate([]byte(`not json`)); err == nil {
+		t.Error("invalid JSON must be rejected")
+	}
+}

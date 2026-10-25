@@ -20,6 +20,9 @@ import (
 const (
 	hnswM           = 16
 	hnswEfConstruct = 128
+	// indexingThresholdKB builds HNSW even for small segments: Qdrant's default (10 MB) leaves a
+	// 10K-product tenant on brute force, where filtered top-500 searches take ~100 ms instead of ~9 ms.
+	indexingThresholdKB = 1000
 )
 
 // VectorDims are the named vectors of a platform collection and their sizes.
@@ -174,11 +177,14 @@ func (s *Store) Create(ctx context.Context, v int) error {
 		}
 		params[vec] = &qdrant.VectorParams{Size: uint64(dim), Distance: qdrant.Distance_Cosine}
 	}
-	m, ef := uint64(hnswM), uint64(hnswEfConstruct)
+	m, ef, threshold := uint64(hnswM), uint64(hnswEfConstruct), uint64(indexingThresholdKB)
+	inRAM := qdrant.Memory_Cached
 	err := s.client.CreateCollection(ctx, &qdrant.CreateCollection{
-		CollectionName: name,
-		VectorsConfig:  qdrant.NewVectorsConfigMap(params),
-		HnswConfig:     &qdrant.HnswConfigDiff{M: &m, EfConstruct: &ef},
+		CollectionName:   name,
+		VectorsConfig:    qdrant.NewVectorsConfigMap(params),
+		HnswConfig:       &qdrant.HnswConfigDiff{M: &m, EfConstruct: &ef},
+		OptimizersConfig: &qdrant.OptimizersConfigDiff{IndexingThreshold: &threshold},
+		Payload:          &qdrant.PayloadStorageParams{Memory: &inRAM},
 	})
 	if err != nil {
 		return fmt.Errorf("create %s: %w", name, err)
@@ -263,14 +269,17 @@ func (s *Store) Drop(ctx context.Context, v int) error {
 // display fields search results need without a second lookup.
 func Payload(p catalog.Product, r *catalog.Registry) map[string]any {
 	out := map[string]any{
-		"vendor_id":     p.VendorID,
-		"title":         p.Title,
-		"category_path": p.CategoryPath,
-		"category_ids":  p.CategoryIDs,
-		"price_minor":   p.PriceMinor,
-		"currency":      p.Currency,
-		"moq":           p.MOQ,
-		"status":        p.Status,
+		"vendor_id":            p.VendorID,
+		"title":                p.Title,
+		"category_path":        p.CategoryPath,
+		"category_ids":         p.CategoryIDs,
+		"price_minor":          p.PriceMinor,
+		"currency":             p.Currency,
+		"moq":                  p.MOQ,
+		"status":               p.Status,
+		"rating_count":         p.RatingCount,
+		"listing_completeness": p.ListingCompleteness,
+		"image_count":          len(p.ImageURLs),
 	}
 	setIf := func(k string, ok bool, v any) {
 		if ok {
@@ -324,6 +333,8 @@ func toValueMap(m map[string]any) (map[string]*qdrant.Value, error) {
 			}
 			norm[k] = arr
 		case int32:
+			norm[k] = int64(x)
+		case int:
 			norm[k] = int64(x)
 		default:
 			norm[k] = v

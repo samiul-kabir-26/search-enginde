@@ -15,7 +15,12 @@ paths:
     post:
       operationId: searchText
       summary: Text search
-      description: "Scope `search:read`. The trace is returned only when `explain=true` and the token has `search:debug`."
+      description: |
+        Scope `search:read`. The trace is returned only when `explain=true` and the token has `search:debug`.
+        Results come from an ordered snapshot of up to the plan's page depth, cached for 10 minutes, so
+        cursor, page-number and offset paging are stable across requests. An expired or tampered cursor
+        returns 400 with error code `invalid_cursor`. Price phrases in `q` ("under $50") become a
+        `price_minor` filter. Exceeding the plan's rate limit returns 429 with `Retry-After`.
       requestBody:
         required: true
         content:
@@ -29,7 +34,9 @@ paths:
               schema: { $ref: "#/components/schemas/SearchResponse" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /v1/search/image:
     post:
@@ -221,9 +228,12 @@ components:
 
     PageRequest:
       type: object
+      description: Set at most one of cursor, number or offset; none means the first page.
       properties:
         size: { type: integer, minimum: 1, maximum: 100, default: 24 }
-        cursor: { type: [string, "null"] }
+        cursor: { type: [string, "null"], description: Opaque cursor from a previous next_cursor. }
+        number: { type: integer, minimum: 1, description: 1-based page number. }
+        offset: { type: integer, minimum: 0, description: Zero-based result offset. }
 
     CropBox:
       type: object
@@ -237,29 +247,54 @@ components:
 
     SearchResponse:
       type: object
-      required: [request_id, config_version, degraded, results]
+      required: [request_id, config_version, degraded, results, offset, total, total_pages, total_matches]
       properties:
         request_id: { type: string }
         config_version: { type: integer }
-        degraded: { type: boolean }
+        degraded: { type: boolean, description: True when results may be incomplete because providers failed. }
         results:
           type: array
           items: { $ref: "#/components/schemas/Result" }
         facets:
           type: object
+          description: Counts per facet field over the filtered lexical matches; a facet ignores the request conditions on its own field.
           additionalProperties:
             type: array
-            items:
+            items: { $ref: "#/components/schemas/FacetValue" }
+        offset: { type: integer, description: Zero-based offset of the first result. }
+        total: { type: integer, description: Ordered results available to page through (at most the plan's page depth). }
+        total_pages: { type: integer }
+        total_matches: { type: integer, description: "Lexical matches with every filter applied (counted up to 10,000)." }
+        query:
+          type: object
+          description: How the query was understood.
+          properties:
+            normalized: { type: string }
+            attributes:
               type: object
-              required: [value, count]
-              properties:
-                value: { type: string }
-                count: { type: integer }
+              additionalProperties: { type: array, items: { type: string } }
+            categories:
+              type: array
+              items:
+                type: object
+                required: [id, confidence]
+                properties:
+                  id: { type: string }
+                  confidence: { type: number }
         next_cursor: { type: [string, "null"] }
         trace:
           oneOf:
             - type: "null"
             - $ref: "#/components/schemas/Trace"
+
+    FacetValue:
+      type: object
+      required: [value, count]
+      properties:
+        value: { type: string, description: "The term, or from-to for a numeric range bucket (open ends left empty)." }
+        count: { type: integer }
+        from: { type: number }
+        to: { type: number }
 
     ImageSearchResponse:
       allOf:
@@ -287,6 +322,7 @@ components:
           type: object
           properties:
             title: { type: string }
+            brand: { type: string }
             price_minor: { type: integer, format: int64 }
             currency: { type: string }
             image_url: { type: string }
@@ -311,6 +347,7 @@ components:
               out_count: { type: integer }
               fallback: { type: boolean }
               fallback_reason: { type: string }
+              error: { type: string }
               candidates:
                 type: array
                 maxItems: 50

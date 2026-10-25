@@ -28,3 +28,19 @@ VALUES (?, ?, ?, ?, ?, ?, ?);
 -- name: CreateOnboardingState :exec
 INSERT INTO onboarding_state (tenant_id, current_step, completed_steps)
 VALUES (?, ?, ?);
+
+-- name: GetPlan :one
+SELECT * FROM plans WHERE id = ?;
+
+-- name: CreateAPIKey :exec
+INSERT INTO tenant_api_keys (id, tenant_id, prefix, hash, scopes)
+VALUES (?, ?, ?, ?, ?);
+
+-- name: GetAPIKeyByPrefix :one
+SELECT * FROM tenant_api_keys WHERE prefix = ? AND revoked_at IS NULL;
+
+-- name: TouchAPIKey :exec
+UPDATE tenant_api_keys SET last_used_at = CURRENT_TIMESTAMP(6) WHERE id = ?;
+
+-- name: CountActiveAPIKeys :one
+SELECT COUNT(*) FROM tenant_api_keys WHERE tenant_id = ? AND revoked_at IS NULL;

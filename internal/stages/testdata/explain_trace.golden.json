@@ -1,0 +1,526 @@
+{
+  "query": {
+    "attributes": {
+      "color": [
+        "red"
+      ],
+      "material": [
+        "leather"
+      ]
+    },
+    "categories": [
+      {
+        "id": "handbags",
+        "confidence": 0.6453
+      },
+      {
+        "id": "bags",
+        "confidence": 0.3547
+      }
+    ],
+    "filter": {
+      "field": "price_minor",
+      "op": "range",
+      "value": {
+        "lte": 5000
+      }
+    },
+    "text": "red leather handbag"
+  },
+  "results": [
+    "p01",
+    "p10",
+    "p05",
+    "p04",
+    "p07",
+    "p09"
+  ],
+  "facets": {
+    "brand": [
+      {
+        "value": "Goodthreads",
+        "count": 1
+      },
+      {
+        "value": "Pinzon",
+        "count": 1
+      },
+      {
+        "value": "Rivet",
+        "count": 2
+      }
+    ]
+  },
+  "degraded": false,
+  "trace": {
+    "stages": [
+      {
+        "stage": "query_understanding",
+        "provider": "fake:text",
+        "latency_ms": 0,
+        "in_count": 0,
+        "out_count": 0,
+        "fallback": false
+      },
+      {
+        "stage": "retrieval",
+        "provider": "rrf",
+        "latency_ms": 0,
+        "in_count": 0,
+        "out_count": 6,
+        "fallback": false,
+        "candidates": [
+          {
+            "product_id": "p01",
+            "scores": {
+              "rrf_score_raw": 0.04098360655737705,
+              "score": 0.04098360655737705
+            }
+          },
+          {
+            "product_id": "p10",
+            "scores": {
+              "rrf_score_raw": 0.04032258064516129,
+              "score": 0.04032258064516129
+            }
+          },
+          {
+            "product_id": "p05",
+            "scores": {
+              "rrf_score_raw": 0.03943452380952381,
+              "score": 0.03943452380952381
+            }
+          },
+          {
+            "product_id": "p04",
+            "scores": {
+              "rrf_score_raw": 0.03931051587301587,
+              "score": 0.03931051587301587
+            }
+          },
+          {
+            "product_id": "p07",
+            "scores": {
+              "rrf_score_raw": 0.023076923076923078,
+              "score": 0.023076923076923078
+            }
+          },
+          {
+            "product_id": "p09",
+            "scores": {
+              "rrf_score_raw": 0.022727272727272728,
+              "score": 0.022727272727272728
+            }
+          }
+        ]
+      },
+      {
+        "stage": "filter",
+        "provider": "pushdown",
+        "latency_ms": 0,
+        "in_count": 6,
+        "out_count": 6,
+        "fallback": false,
+        "candidates": [
+          {
+            "product_id": "p01",
+            "scores": {
+              "rrf_score_raw": 0.04098360655737705,
+              "score": 0.04098360655737705
+            }
+          },
+          {
+            "product_id": "p10",
+            "scores": {
+              "rrf_score_raw": 0.04032258064516129,
+              "score": 0.04032258064516129
+            }
+          },
+          {
+            "product_id": "p05",
+            "scores": {
+              "rrf_score_raw": 0.03943452380952381,
+              "score": 0.03943452380952381
+            }
+          },
+          {
+            "product_id": "p04",
+            "scores": {
+              "rrf_score_raw": 0.03931051587301587,
+              "score": 0.03931051587301587
+            }
+          },
+          {
+            "product_id": "p07",
+            "scores": {
+              "rrf_score_raw": 0.023076923076923078,
+              "score": 0.023076923076923078
+            }
+          },
+          {
+            "product_id": "p09",
+            "scores": {
+              "rrf_score_raw": 0.022727272727272728,
+              "score": 0.022727272727272728
+            }
+          }
+        ]
+      },
+      {
+        "stage": "prerank",
+        "provider": "default_linear",
+        "latency_ms": 0,
+        "in_count": 6,
+        "out_count": 6,
+        "fallback": false,
+        "candidates": [
+          {
+            "product_id": "p01",
+            "scores": {
+              "bm25_norm": 1,
+              "cosine_image": 0.9129,
+              "cosine_text": 1,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.38286413964890953,
+              "query_category_match": 0.6453,
+              "rating": 0.9199999999999999,
+              "rating_count_log": 0.47957905455967414,
+              "retriever_count": 1,
+              "rrf_score": 1,
+              "rrf_score_raw": 0.04098360655737705,
+              "score": 1.6290600299835205
+            }
+          },
+          {
+            "product_id": "p10",
+            "scores": {
+              "bm25_norm": 0.6666666666666667,
+              "cosine_image": 0.7303,
+              "cosine_text": 0.8,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.23025850929940458,
+              "query_category_match": 0.3547,
+              "rating": 0.76,
+              "rating_count_log": 0.3433987204485146,
+              "retriever_count": 1,
+              "rrf_score": 0.9838709677419354,
+              "rrf_score_raw": 0.04032258064516129,
+              "score": 1.4281443357467651
+            }
+          },
+          {
+            "product_id": "p05",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.4472,
+              "cosine_text": 0.5164,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2995732273553991,
+              "query_category_match": 0.3547,
+              "rating": 0.8800000000000001,
+              "rating_count_log": 0.6216606101084865,
+              "retriever_count": 1,
+              "rrf_score": 0.9622023809523809,
+              "rrf_score_raw": 0.03943452380952381,
+              "score": 1.2547290325164795
+            }
+          },
+          {
+            "product_id": "p04",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.2236,
+              "cosine_text": 0.2582,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.3258096538021482,
+              "query_category_match": 0.3547,
+              "rating": 0.78,
+              "rating_count_log": 0.43307333402863313,
+              "retriever_count": 1,
+              "rrf_score": 0.9591765873015872,
+              "rrf_score_raw": 0.03931051587301587,
+              "score": 1.1742432117462158
+            }
+          },
+          {
+            "product_id": "p07",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2772588722239781,
+              "query_category_match": 0,
+              "rating": 0.9400000000000001,
+              "rating_count_log": 0.6803505257608338,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.563076923076923,
+              "rrf_score_raw": 0.023076923076923078,
+              "score": 0.563076913356781
+            }
+          },
+          {
+            "product_id": "p09",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.358351893845611,
+              "query_category_match": 0,
+              "rating": 0.86,
+              "rating_count_log": 0.4110873864173311,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.5545454545454546,
+              "rrf_score_raw": 0.022727272727272728,
+              "score": 0.5545454621315002
+            }
+          }
+        ]
+      },
+      {
+        "stage": "rank",
+        "provider": "default_linear",
+        "latency_ms": 0,
+        "in_count": 6,
+        "out_count": 6,
+        "fallback": false,
+        "candidates": [
+          {
+            "product_id": "p01",
+            "scores": {
+              "bm25_norm": 1,
+              "cosine_image": 0.9129,
+              "cosine_text": 1,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.38286413964890953,
+              "query_category_match": 0.6453,
+              "rating": 0.9199999999999999,
+              "rating_count_log": 0.47957905455967414,
+              "retriever_count": 1,
+              "rrf_score": 1,
+              "rrf_score_raw": 0.04098360655737705,
+              "score": 2.881740093231201
+            }
+          },
+          {
+            "product_id": "p10",
+            "scores": {
+              "bm25_norm": 0.6666666666666667,
+              "cosine_image": 0.7303,
+              "cosine_text": 0.8,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.23025850929940458,
+              "query_category_match": 0.3547,
+              "rating": 0.76,
+              "rating_count_log": 0.3433987204485146,
+              "retriever_count": 1,
+              "rrf_score": 0.9838709677419354,
+              "rrf_score_raw": 0.04032258064516129,
+              "score": 2.470717668533325
+            }
+          },
+          {
+            "product_id": "p05",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.4472,
+              "cosine_text": 0.5164,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2995732273553991,
+              "query_category_match": 0.3547,
+              "rating": 0.8800000000000001,
+              "rating_count_log": 0.6216606101084865,
+              "retriever_count": 1,
+              "rrf_score": 0.9622023809523809,
+              "rrf_score_raw": 0.03943452380952381,
+              "score": 1.9996956586837769
+            }
+          },
+          {
+            "product_id": "p04",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.2236,
+              "cosine_text": 0.2582,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.3258096538021482,
+              "query_category_match": 0.3547,
+              "rating": 0.78,
+              "rating_count_log": 0.43307333402863313,
+              "retriever_count": 1,
+              "rrf_score": 0.9591765873015872,
+              "rrf_score_raw": 0.03931051587301587,
+              "score": 1.6875898838043213
+            }
+          },
+          {
+            "product_id": "p07",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2772588722239781,
+              "query_category_match": 0,
+              "rating": 0.9400000000000001,
+              "rating_count_log": 0.6803505257608338,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.563076923076923,
+              "rrf_score_raw": 0.023076923076923078,
+              "score": 0.563076913356781
+            }
+          },
+          {
+            "product_id": "p09",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.358351893845611,
+              "query_category_match": 0,
+              "rating": 0.86,
+              "rating_count_log": 0.4110873864173311,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.5545454545454546,
+              "rrf_score_raw": 0.022727272727272728,
+              "score": 0.5545454621315002
+            }
+          }
+        ]
+      },
+      {
+        "stage": "rerank",
+        "provider": "passthrough",
+        "latency_ms": 0,
+        "in_count": 6,
+        "out_count": 6,
+        "fallback": false,
+        "candidates": [
+          {
+            "product_id": "p01",
+            "scores": {
+              "bm25_norm": 1,
+              "cosine_image": 0.9129,
+              "cosine_text": 1,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.38286413964890953,
+              "query_category_match": 0.6453,
+              "rating": 0.9199999999999999,
+              "rating_count_log": 0.47957905455967414,
+              "retriever_count": 1,
+              "rrf_score": 1,
+              "rrf_score_raw": 0.04098360655737705,
+              "score": 2.881740093231201
+            }
+          },
+          {
+            "product_id": "p10",
+            "scores": {
+              "bm25_norm": 0.6666666666666667,
+              "cosine_image": 0.7303,
+              "cosine_text": 0.8,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.23025850929940458,
+              "query_category_match": 0.3547,
+              "rating": 0.76,
+              "rating_count_log": 0.3433987204485146,
+              "retriever_count": 1,
+              "rrf_score": 0.9838709677419354,
+              "rrf_score_raw": 0.04032258064516129,
+              "score": 2.470717668533325
+            }
+          },
+          {
+            "product_id": "p05",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.4472,
+              "cosine_text": 0.5164,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2995732273553991,
+              "query_category_match": 0.3547,
+              "rating": 0.8800000000000001,
+              "rating_count_log": 0.6216606101084865,
+              "retriever_count": 1,
+              "rrf_score": 0.9622023809523809,
+              "rrf_score_raw": 0.03943452380952381,
+              "score": 1.9996956586837769
+            }
+          },
+          {
+            "product_id": "p04",
+            "scores": {
+              "bm25_norm": 0.33333333333333337,
+              "cosine_image": 0.2236,
+              "cosine_text": 0.2582,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.3258096538021482,
+              "query_category_match": 0.3547,
+              "rating": 0.78,
+              "rating_count_log": 0.43307333402863313,
+              "retriever_count": 1,
+              "rrf_score": 0.9591765873015872,
+              "rrf_score_raw": 0.03931051587301587,
+              "score": 1.6875898838043213
+            }
+          },
+          {
+            "product_id": "p07",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.2772588722239781,
+              "query_category_match": 0,
+              "rating": 0.9400000000000001,
+              "rating_count_log": 0.6803505257608338,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.563076923076923,
+              "rrf_score_raw": 0.023076923076923078,
+              "score": 0.563076913356781
+            }
+          },
+          {
+            "product_id": "p09",
+            "scores": {
+              "bm25_norm": 0,
+              "cosine_image": 0,
+              "cosine_text": 0,
+              "image_count": 0.1,
+              "listing_completeness": 0.8,
+              "price_minor_log": 0.358351893845611,
+              "query_category_match": 0,
+              "rating": 0.86,
+              "rating_count_log": 0.4110873864173311,
+              "retriever_count": 0.6666666666666666,
+              "rrf_score": 0.5545454545454546,
+              "rrf_score_raw": 0.022727272727272728,
+              "score": 0.5545454621315002
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "total_matches": 6
+}

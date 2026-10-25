@@ -11,6 +11,41 @@ import (
 	"encoding/json"
 )
 
+const countActiveAPIKeys = `-- name: CountActiveAPIKeys :one
+SELECT COUNT(*) FROM tenant_api_keys WHERE tenant_id = ? AND revoked_at IS NULL
+`
+
+func (q *Queries) CountActiveAPIKeys(ctx context.Context, tenantID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countActiveAPIKeys, tenantID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
+const createAPIKey = `-- name: CreateAPIKey :exec
+INSERT INTO tenant_api_keys (id, tenant_id, prefix, hash, scopes)
+VALUES (?, ?, ?, ?, ?)
+`
+
+type CreateAPIKeyParams struct {
+	ID       string          `json:"id"`
+	TenantID string          `json:"tenant_id"`
+	Prefix   string          `json:"prefix"`
+	Hash     []byte          `json:"hash"`
+	Scopes   json.RawMessage `json:"scopes"`
+}
+
+func (q *Queries) CreateAPIKey(ctx context.Context, arg CreateAPIKeyParams) error {
+	_, err := q.db.ExecContext(ctx, createAPIKey,
+		arg.ID,
+		arg.TenantID,
+		arg.Prefix,
+		arg.Hash,
+		arg.Scopes,
+	)
+	return err
+}
+
 const createConfigVersion = `-- name: CreateConfigVersion :exec
 INSERT INTO tenant_config_versions (id, tenant_id, version, document, schema_version, state, created_by)
 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -81,6 +116,26 @@ func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) erro
 	return err
 }
 
+const getAPIKeyByPrefix = `-- name: GetAPIKeyByPrefix :one
+SELECT id, tenant_id, prefix, hash, scopes, created_at, last_used_at, revoked_at FROM tenant_api_keys WHERE prefix = ? AND revoked_at IS NULL
+`
+
+func (q *Queries) GetAPIKeyByPrefix(ctx context.Context, prefix string) (TenantApiKey, error) {
+	row := q.db.QueryRowContext(ctx, getAPIKeyByPrefix, prefix)
+	var i TenantApiKey
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.Prefix,
+		&i.Hash,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.LastUsedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getActiveConfigVersion = `-- name: GetActiveConfigVersion :one
 SELECT id, tenant_id, version, document, schema_version, state, shadow_sample_rate, created_at, created_by FROM tenant_config_versions
 WHERE tenant_id = ? AND state = 'active'
@@ -99,6 +154,30 @@ func (q *Queries) GetActiveConfigVersion(ctx context.Context, tenantID string) (
 		&i.ShadowSampleRate,
 		&i.CreatedAt,
 		&i.CreatedBy,
+	)
+	return i, err
+}
+
+const getPlan = `-- name: GetPlan :one
+SELECT id, name, max_total_ms, search_rps, search_burst, events_rps, byo_allowed, egress_allowlist, max_custom_fields, max_page_depth, created_at, updated_at FROM plans WHERE id = ?
+`
+
+func (q *Queries) GetPlan(ctx context.Context, id string) (Plan, error) {
+	row := q.db.QueryRowContext(ctx, getPlan, id)
+	var i Plan
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.MaxTotalMs,
+		&i.SearchRps,
+		&i.SearchBurst,
+		&i.EventsRps,
+		&i.ByoAllowed,
+		&i.EgressAllowlist,
+		&i.MaxCustomFields,
+		&i.MaxPageDepth,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -174,6 +253,15 @@ func (q *Queries) ListActiveConfigVersions(ctx context.Context) ([]ListActiveCon
 		return nil, err
 	}
 	return items, nil
+}
+
+const touchAPIKey = `-- name: TouchAPIKey :exec
+UPDATE tenant_api_keys SET last_used_at = CURRENT_TIMESTAMP(6) WHERE id = ?
+`
+
+func (q *Queries) TouchAPIKey(ctx context.Context, id string) error {
+	_, err := q.db.ExecContext(ctx, touchAPIKey, id)
+	return err
 }
 
 const upsertConfigDraft = `-- name: UpsertConfigDraft :exec

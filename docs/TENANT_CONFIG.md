@@ -34,7 +34,7 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
 {
   "schema_version": 1,
   "locale": "en",
-  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 80, "s3_ms": 10, "s4_ms": 15, "s5_ms": 80, "s6_ms": 30 },
+  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 120, "s3_ms": 10, "s4_ms": 15, "s5_ms": 40, "s6_ms": 30 },
 
   "catalog": {
     "ingestion": "events",
@@ -55,6 +55,10 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
     ]
   },
 
+  "query": {
+    "attributes": { "material": ["vegan leather"], "style": ["boho", "mid century"] }
+  },
+
   "embedders": {
     "text":  { "provider": "platform", "model": "bge-small-en-v1.5" },
     "image": { "provider": "platform", "model": "clip-vit-b32" }
@@ -69,8 +73,15 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
     "text":  { "retrievers": [ { "name": "lexical_bm25", "k": 500, "weight": 1.0 }, { "name": "vector_text", "k": 500, "weight": 1.0 }, { "name": "vector_text_to_image", "k": 200, "weight": 0.5 } ] },
     "image": { "retrievers": [ { "name": "vector_image", "k": 500, "weight": 1.0 } ] },
     "rrf_k": 60,
-    "field_boosts": { "title": 3.0, "brand": 2.0, "attributes": 1.5, "description": 1.0 }
+    "field_boosts": { "title": 3.0, "brand": 2.0, "attributes": 1.5, "description": 1.0 },
+    "ef": 128
   },
+
+  "facets": [
+    { "field": "category_ids", "size": 20 },
+    { "field": "brand", "size": 20 },
+    { "field": "price_minor", "ranges": [ { "to": 2500 }, { "from": 2500, "to": 5000 }, { "from": 5000 } ] }
+  ],
 
   "policy": {
     "always_filters": [
@@ -146,6 +157,10 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 "rerank": { "model": { "type": "kserve_v2", "model_id": "01J..." }, "diversity": { ... } }
 ```
 
+**Budgets.** The defaults give S2 the largest share because it fans out to three stores, and S5 only 40 ms because `default_linear` scores in under a millisecond; a tenant with a remote rank model moves budget back to S5.
+
+**Optional sections.** `query.attributes` extends the built-in S1 attribute dictionary (colours, materials, sizes) with tenant terms. `facets` replaces the default facets (`category_ids`, `brand`, `price_minor` ranges, `ship_regions`); numeric fields need `ranges` (half-open `[from, to)`), keyword fields take a `size`. `retrieval.ef` is the HNSW search breadth (default 128). `field_boosts` keys are canonical searchable fields or `custom.{name}`.
+
 **Catalog mapping and custom fields** (PLAN.md R1). `field_mapping` maps canonical fields to RFC 9535 JSONPath expressions over the tenant's product JSON; `product_id`, `title`, `category_path`, `price_minor` and `currency` must be mapped, and `tenant_id`, `category_ids` and `listing_completeness` are derived, never mapped. `custom_fields` adds tenant fields: `{name, type, source, filterable, facetable, searchable, sortable, required}` with `type` one of `keyword`, `keyword[]`, `text`, `int`, `float`, `bool`, `date`. They are stored under `custom.{name}` (explicit OpenSearch mapping per index version, Qdrant payload index when filterable) and addressed as `custom.{name}` in filters, facets and CEL. Adding a field is an online change; changing a field's type or making it filterable needs a re-index.
 
 ## 5. Validation rules (enforced on publish)
@@ -160,7 +175,7 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 5. Every `connection_id` and `model_id` must exist, belong to the tenant, and have `status = validated`.
 
 **Retrieval**
-6. Retrievers referenced must be available given the configured embedders and stores. For example, `vector_text_to_image` requires the image embedder to expose a text tower: `clip-vit-b32` does; a BYO embedder must declare `supports_text_to_image: true`.
+6. Retrievers must be known for the query type, listed once, with `k` in `[1, 2000]` and `weight` in `(0, 5]`; `rrf_k` > 0. Retrievers referenced must be available given the configured embedders and stores. For example, `vector_text_to_image` requires the image embedder to expose a text tower: `clip-vit-b32` does; a BYO embedder must declare `supports_text_to_image: true`.
 
 **Policy**
 7. CEL rules compile in the restricted environment:
@@ -171,7 +186,7 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 8. `always_filters` fields must exist in the canonical schema and be indexed for pushdown.
 
 **Scorers and re-ranking**
-9. Every feature in a scorer's feature schema must be resolvable from the feature catalog (`docs/MODELS.md` §4).
+9. Every feature in a scorer's feature schema must be resolvable from the feature catalog (`docs/MODELS.md` §4); `default_linear` weights are within `[0, 5]` and cannot use user features (re-rank only).
 10. `prerank.keep` must be ≥ `rank.keep`, which must be ≥ 10.
 
 **Ads**
@@ -181,6 +196,9 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 **Mapping**
 13. `field_mapping` is a JSONPath per field. Keys must be mappable canonical fields, every mandatory field must be mapped, and every expression must parse. It is validated against a sample payload supplied in onboarding step 2.
 14. `custom_fields` names match `^[a-z][a-z0-9_]{0,62}$` and are unique, their count is within the plan cap, `text` fields can only be searchable, only `text`/`keyword` fields can be searchable, `date` fields cannot be facets, and `keyword[]` fields cannot be sortable.
+
+**Facets**
+15. Facet fields must be facetable; numeric facets need `ranges`, keyword facets cannot have them; at most 20 facets, `size` ≤ 100.
 
 The validation response returns every error, not just the first: `[{ "path": "/rank/scorer/model_id", "code": "model_not_validated", "message": "..." }]`.
 

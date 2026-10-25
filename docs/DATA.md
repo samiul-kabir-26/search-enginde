@@ -109,6 +109,10 @@ The goal is a learnable ranking signal, not noise.
 - `source_version` orders changes to one product. OpenSearch is the arbiter: writes use `version_type=external_gte`, so an older version is rejected as stale (and then skipped for Qdrant too) while an equal version re-applies, making replays idempotent. `source_version: 0` (and tombstones) apply unconditionally.
 - Events that fail mapping or validation are logged and counted as invalid, never retried; store or model failures retry the batch with backoff (at-least-once).
 
+**Topic retention.** `catalog.product.v1` is compacted (`cleanup.policy=compact`), so a backfill reads roughly one event per product rather than the whole history.
+
+**Category centroids.** Every backfill builds per-category centroids of the new version's `text` vectors (mean over a category's products, leaf and ancestors, re-normalized, at least 3 products) and stores them in S3 at `centroids/{tenant}/v{n}.bin` with a sha256 manifest before promoting the version. `featurejob centroids -tenant <slug>` (`make centroids`) refreshes them for the active version.
+
 **Index versions.** The indexer creates and promotes `v1` on a tenant's first event. `indexer -backfill -tenant <slug>` rebuilds into `v{n+1}` from the start of the topic, checks that both stores hold exactly the live products, swaps both aliases, and drops versions older than the previous one.
 
 The data-prep scripts do not compute embeddings, so indexing and query use the same embedding path.
@@ -119,7 +123,7 @@ The data-prep scripts do not compute embeddings, so indexing and query use the s
 
 **Qdrant collection `t_{tenant}_products_v{n}`:**
 - Named vectors: `text` (size 384, Cosine) and `image` (size 512, Cosine).
-- HNSW: `m=16`, `ef_construct=128`. Search `ef` comes from config (default 128).
+- HNSW: `m=16`, `ef_construct=128`. Search `ef` comes from config (default 128). The optimizer's `indexing_threshold` is 1,000 KB, so HNSW is built even for small tenants (Qdrant's 10 MB default leaves a 10K-product collection on brute force, where filtered top-500 searches take ~100 ms instead of ~9 ms). Payloads use `memory: cached`.
 - Payload indexes: `vendor_id`, `category_ids`, `brand`, `status`, `stock` (integer), `price_minor` (integer), `ship_regions`, `moq`.
 - Point ID: UUIDv5 of `product_id`; `product_id` is also stored in the payload.
 

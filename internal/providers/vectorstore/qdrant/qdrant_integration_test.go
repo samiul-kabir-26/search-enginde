@@ -9,6 +9,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
+	"github.com/zavisoft/search-engine/internal/pipeline/filter"
 	"github.com/zavisoft/search-engine/internal/tenant"
 	"github.com/zavisoft/search-engine/internal/testinfra"
 )
@@ -59,6 +60,25 @@ func TestStoreVersionsUpsertDelete(t *testing.T) {
 	}
 	if n, err := s.Count(ctx, 1); err != nil || n != 2 {
 		t.Fatalf("count = %d, %v; want 2 (upsert is idempotent per product)", n, err)
+	}
+	hits, err := s.Search(ctx, pipeline.VectorSearch{Vector: "text", Query: vec(4, 1), K: 5})
+	if err != nil || len(hits) != 2 || hits[0].ProductID != "abo:2" || hits[0].Score < 0.99 {
+		t.Fatalf("search = %+v, %v", hits, err)
+	}
+	onlyActive := filter.Expr{Cond: &filter.Condition{Field: "stock", Op: filter.Gt, Value: int64(0), Type: catalog.TypeInt}}
+	hits, err = s.Search(ctx, pipeline.VectorSearch{Vector: "text", Query: vec(4, 1), K: 5, Filter: onlyActive, EF: 64})
+	if err != nil || len(hits) != 1 || hits[0].ProductID != "abo:1" || hits[0].Doc.PriceMinor != 10 || hits[0].Doc.ImageCount != 1 {
+		t.Fatalf("filtered search must push the filter down: %+v, %v", hits, err)
+	}
+	var scrolled []string
+	if err := s.ScrollVectors(ctx, 1, "text", func(id string, v []float32, cats []string) error {
+		scrolled = append(scrolled, id)
+		if len(v) != 4 {
+			t.Errorf("vector dims = %d", len(v))
+		}
+		return nil
+	}); err != nil || len(scrolled) != 2 {
+		t.Errorf("scroll = %v, %v", scrolled, err)
 	}
 	if err := s.Delete(ctx, []string{"abo:2", "missing"}); err != nil {
 		t.Fatal(err)

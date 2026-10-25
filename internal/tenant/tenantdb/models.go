@@ -268,6 +268,21 @@ type OnboardingState struct {
 	UpdatedAt      time.Time       `json:"updated_at"`
 }
 
+type Plan struct {
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	MaxTotalMs      int32           `json:"max_total_ms"`
+	SearchRps       int32           `json:"search_rps"`
+	SearchBurst     int32           `json:"search_burst"`
+	EventsRps       int32           `json:"events_rps"`
+	ByoAllowed      bool            `json:"byo_allowed"`
+	EgressAllowlist json.RawMessage `json:"egress_allowlist"`
+	MaxCustomFields int32           `json:"max_custom_fields"`
+	MaxPageDepth    int32           `json:"max_page_depth"`
+	CreatedAt       time.Time       `json:"created_at"`
+	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
 type Tenant struct {
 	ID        string    `json:"id"`
 	Slug      string    `json:"slug"`

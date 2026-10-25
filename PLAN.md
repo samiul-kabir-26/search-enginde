@@ -9,7 +9,17 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M1 is done.** M0 is complete except a green CI run, which is blocked by the GitHub account billing lock, not by the code.
+**M2 is done** (M1 and M0 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M2 verification (2026-10-25, same laptop, everything running locally including Chrome and the IDE):
+
+| Check | Result |
+|---|---|
+| `POST /v1/search` | Relevant results on the demo catalog, e.g. "office chair", "gold earrings", "red running shoes under $80" (price phrase → `price_minor ≤ 8000`); predicted categories from 1,336 centroids; `?explain=true` trace with per-stage provider, latency, counts, fallbacks and top-50 scores |
+| Paging and facets | Cursor, page-number and offset paging read one snapshot (no overlap); disjunctive facets verified against OpenSearch |
+| `make loadtest` | 50 RPS for 60 s with the snapshot cache flushed (88% of requests ran the full pipeline): **p95 95.9 ms** (target 150), max 168 ms, 0 errors, 0 degraded, no breaker trips, 1.4% of embedding calls over the S1 budget. Warm reruns: p95 63–74 ms. One of six runs, started right after a full `go test` build, hit a CPU stall that tripped breakers (3.6% degraded, still 0 errors): the laptop shares 12 cores between every service, Triton, k6, the IDE and a browser. |
+| Auth | `POST /v1/auth/token` (demo API key from `make seed`) → EdDSA JWT verified by search-api through the JWKS |
+| Tests | Golden explain-trace test, unit tests for every stage, integration tests (MySQL, OpenSearch, Qdrant, Redpanda); coverage pipeline 87.6%, stages 94.7%, tenant 80.5% (`make cover`) |
 
 M1 verification (2026-10-25, 12-core CPU laptop, CPU Triton):
 
@@ -53,6 +63,14 @@ M0 verification:
 | D13 | `select.py` downloads only the selected images (~11K, ~85 MB) instead of the 3 GiB tarball (used when present) | The ABO bucket gives about 4 KB/s per connection from this network; parallel per-image fetches take about 6 min. |
 | D14 | Selection keeps only English category trees (`/Categories/...`) and dedupes on main image too | Non-English marketplaces have localized category paths; ABO variants share photos, which would duplicate products and make image eval ambiguous. |
 | D15 | Pooling and L2 normalization are inside the exported ONNX graphs; ensembles take `[N]` BYTES with `max_batch_size: 0`, ONNX models batch dynamically | Keeps the §1 tensor contract exactly while still batching on the encoders. |
+| D16 | search-api's HTTP layer lives in `internal/searchapi`; the filter AST and feature catalog are `internal/pipeline/filter` and `internal/pipeline/feature` | Not in the spec layout; separate packages avoid import cycles (tenant config uses the filter AST). |
+| D17 | `tenants.plan` is a foreign key to the new `plans` table (migration 000002, seeded with R3) | Plans are data the admin panel edits (R7). |
+| D18 | Retrieval reads only ranking fields (OpenSearch doc values, trimmed Qdrant payload); display fields are fetched for the returned page with one `mget` | Loading `_source` for 500–1,000 hits made BM25 50–400 ms; doc values take 20–35 ms. |
+| D19 | Lexical and vector retrievers return `k` (config) hits, not the page depth; depth is reached through the RRF union | Keeps S2 inside 80 ms. |
+| D20 | Breakers trip after 10 consecutive failures or ≥ 50% of ≥ 20 calls; ORT text encoders run 2 instances × 2 threads | With 5 consecutive failures and 4 threads, CPU oversubscription under load opened the embedder breakers; tuned until 50 RPS ran clean. |
+| D21 | The catalog topic is compacted; Qdrant `indexing_threshold` is 1,000 KB and payloads are `memory: cached` | Backfills read each product once; HNSW is built for small tenants (filtered top-500 search: 102 ms → 9 ms). |
+| D23 | Default stage budgets move 40 ms from S5 to S2 (`s2_ms` 120, `s5_ms` 40; total still 300) | `default_linear` ranks in < 1 ms while S2 runs three retrievers; at 80 ms, CPU contention timed out vector retrieval. The demo tenant's stored v1 was updated in place (dev data). |
+| D22 | The tenant attribute dictionary is a new optional `query.attributes` section; facets are a new optional `facets` section; `retrieval.ef` is optional | The spec named the features but not where their config lives. |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
 ### Resolved questions (answered 2026-10-25)
@@ -219,24 +237,26 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 
 ---
 
-## M2 — Text search: S1–S3, default_linear, explain, JWT, rate limit
+## M2 — Text search: S1–S3, default_linear, explain, JWT, rate limit ✅
 
-**Done when:** text search returns ranked results with a per-stage trace at `?explain=true`, and p95 ≤ 150 ms locally at 50 RPS.
+**Done when:** text search returns ranked results with a per-stage trace at `?explain=true`, and p95 ≤ 150 ms locally at 50 RPS. **Met: p95 95.9 ms cache-cold.**
 
-- [ ] `internal/tenant`: typed config sections (`docs/TENANT_CONFIG.md` §3), `DisallowUnknownFields`, `Validate(ctx, deps) []FieldError` (rules that need no live deps), schema-version migration hook, sqlc store, cache, resolver
-- [ ] `internal/auth`: EdDSA verify, JWKS fetch/cache/rotate, tenant context from `tid`, scope checks (`search:read`, `search:debug`); thin control-api token-issuance slice for `demo` (**R5**)
-- [ ] `internal/pipeline`: the consumer-side interfaces (`docs/ARCHITECTURE.md` §3), `Query`/`Hit`/`Candidate`/`Trace` types, per-stage budget `min(stage, remaining)`, RRF (k=60, per-retriever weights), explain trace (top 50), stage metrics
-- [ ] `internal/resilience`: `Call(ctx, key, primary, fallback)` with deadline, `sony/gobreaker/v2` keyed by tenant+stage+provider, and `search_stage_fallback_total`
-- [ ] `FilterExpr` AST: parse and validate (operators, depth ≤ 3, filterable fields only), translate to OpenSearch `bool.filter` and the Qdrant payload filter. Pushdown is mandatory.
-- [ ] S1 text: NFKC, lowercase, whitespace collapse; attribute dictionary (tenant-extensible); category kNN vote over in-memory centroids loaded from S3 (**R6**); embeddings
-- [ ] Centroid builder (shared by the index job and `featurejob`): `models/centroids/{tenant}/v{n}.bin` plus manifest (**R6**)
-- [ ] S2 retrievers: `lexical_bm25` (field boosts), `vector_text`, `vector_text_to_image`, `category_popular`; errgroup fan-out; partial failure tolerated; all failing returns `degraded=true`, never 5xx
-- [ ] S3: `always_filters` pushdown (CEL rules come in M7)
-- [ ] S4/S5 `providers/scorer/defaultlinear`, plus keep/cut; S6 passthrough
-- [ ] `POST /v1/search`: validation, problem+json errors, configurable disjunctive facets, and three pagination modes (cursor, page number, offset) over a Redis result snapshot with signed cursors and plan max depth (**R4**). Update `search.yaml` first.
-- [ ] `plans` table migration and seed (starter, growth, enterprise); per-tenant GCRA rate limit from the plan (`go-redis/redis_rate`, **R3**)
-- [ ] Golden tests for the explain trace; unit tests for every stage; coverage ≥ 80% on pipeline, stages and tenant
-- [ ] k6 `loadtest/search_text.js` at 50 RPS: p95 ≤ 150 ms
+- [x] `internal/tenant`: typed config sections, `DisallowUnknownFields`, `Validate(ctx, deps) []FieldError` (every rule without live deps, all errors reported), schema-version migration hook, sqlc store, TTL cache and resolver (plan + compiled always_filters)
+- [x] `internal/auth`: EdDSA verify, JWKS fetch/cache/refresh on unknown kid, tenant from `tid`, scope middleware; control-api slice: JWKS + `POST /v1/auth/token` (API key → 15 min JWT), demo API key written by `make seed` (**R5**)
+- [x] `internal/pipeline`: consumer-side interfaces, `Query`/`Hit`/`Candidate`/`Trace`, stage budget `min(stage, remaining)`, weighted RRF (k=60), explain trace (top 50), stage/request/empty metrics and spans
+- [x] `internal/resilience`: `Call(ctx, key, primary, fallback)` with deadline and fallback reserve, `sony/gobreaker/v2` keyed by tenant+stage+provider, `search_stage_fallback_total`, `provider_breaker_state`
+- [x] `FilterExpr` AST (`internal/pipeline/filter`): parse, validate and normalize (operators per type, depth ≤ 3, filterable fields incl. custom), translated to OpenSearch `bool` and the Qdrant payload filter; always pushed down
+- [x] S1 text: NFKC, lowercase, whitespace collapse; price phrases → filter; attribute dictionary (tenant-extensible, **D22**); category kNN vote over centroids loaded from S3 (**R6**); text and text→image embeddings
+- [x] Centroid builder (`internal/catalog/centroids`): built by every backfill and by `featurejob centroids`; `centroids/{tenant}/v{n}.bin` + manifest (**R6**)
+- [x] S2 retrievers: `lexical_bm25` (field boosts, disjunctive facets), `vector_text`, `vector_text_to_image`, `category_popular`; errgroup fan-out; partial failure tolerated; all failing returns `degraded=true`, never 5xx
+- [x] S3: `always_filters` pushdown (CEL rules come in M7)
+- [x] S4/S5 `providers/scorer/defaultlinear` with normalized features, keep/cut preserving deep-page order; S6 passthrough with depth cut
+- [x] `POST /v1/search`: strict validation, problem+json errors, configurable disjunctive facets, three pagination modes over a Redis snapshot with HMAC cursors and plan page depth (**R4**); `search.yaml` updated first
+- [x] `plans` table migration and seed (**D17**); per-tenant GCRA rate limit from the plan (`go-redis/redis_rate`, **R3**)
+- [x] Golden test for the explain trace; unit tests for every stage; coverage ≥ 80% on pipeline, stages and tenant
+- [x] k6 `loadtest/search_text.js` at 50 RPS: p95 ≤ 150 ms (95.9 ms cache-cold, 63–74 ms warm)
+
+Carried forward: load and isolation testing on dedicated hardware (M10), where breaker thresholds can be revisited with real contention data; config activation pub/sub (M4) replaces the 30 s resolver TTL; the registry's factories, LRU and BYO providers come in M4–M5; ONNX/KServe scorers in M7.
 
 ---
 
@@ -368,7 +388,10 @@ make up-models && make migrate   # infra + Triton
 make data && make models         # dataset (ABO subset) and ONNX exports, once
 make seed                        # demo tenant, images, catalog events
 make run-indexer                 # streaming indexer (or: make backfill TENANT=demo)
-make run-search-api # :8080   (make run-control-api → :8081)
+make run-control-api             # :8081  JWKS + token exchange
+make run-search-api              # :8080  POST /v1/search
+make token                       # JWT for the demo API key
+make loadtest                    # k6, 50 RPS
 make lint test
 make up-obs         # + Jaeger :16686, Prometheus :9090, Grafana :3001
 make down           # or `make nuke` to drop volumes

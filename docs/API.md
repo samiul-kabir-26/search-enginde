@@ -5,7 +5,7 @@ The OpenAPI 3.1 files in `api/openapi/` are the source of truth. Write them firs
 **Common rules**
 - JSON only, except image upload, which uses `multipart/form-data`.
 - Errors use RFC 9457 `application/problem+json` with the extension `errors: [{path, code, message}]`.
-- Pagination uses opaque `cursor` tokens.
+- Search pagination: `page.cursor` (opaque), `page.number` or `page.offset`, plus `page.size` (1–100, default 24); at most one mode per request. All three read one cached result snapshot (§1).
 - Idempotency: `POST` endpoints that create resources accept an `Idempotency-Key` header, with keys stored for 24 h.
 
 **Auth**
@@ -45,7 +45,15 @@ Response:
 }
 ```
 
-Filter operators: `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, `contains`, `range`. Filters combine with `and`/`or` with a maximum nesting depth of 3, and only on fields marked filterable in the canonical schema.
+Filter operators: `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, `contains`, `range`. Filters combine with `and`/`or` with a maximum nesting depth of 3, and only on fields marked filterable in the canonical schema (or `custom.{name}` fields marked filterable). `range` takes `{gt, gte, lt, lte}`; `contains` applies to multi-valued fields such as `ship_regions`.
+
+**Query understanding.** Price phrases in `q` ("under $50", "between 20 and 40 dollars", "over 100", but not "under 5 lbs") become a `price_minor` filter and are removed from the matched text. The response's `query` object echoes the normalized text, extracted attributes and predicted categories.
+
+**Pagination and snapshots.** The first request runs the pipeline and caches the ordered result list (up to the plan's page depth) for 10 minutes, keyed by tenant, config version, normalized query, filters and user. Every paging mode reads that snapshot, so pages never overlap or shift. The response carries `offset`, `total` (results available to page through), `total_pages`, `total_matches` (lexical matches with every filter applied, counted up to 10,000) and `next_cursor` (null on the last page). Cursors are HMAC-signed and bound to the tenant and query; a tampered, foreign or expired cursor returns 400 with error code `invalid_cursor`.
+
+**Facets.** Counts are computed over the filtered lexical matches and are disjunctive: a facet ignores the request conditions on its own field. Facets are configured per tenant (`facets` in the config, defaulting to `category_ids`, `brand`, `price_minor` ranges and `ship_regions`); numeric facets return range buckets with `value` `"from-to"` plus `from`/`to`.
+
+**Errors and limits.** 400 for validation errors (every error reported, with JSON Pointer paths), 401 for a missing or invalid token, 403 for a missing scope or an inactive tenant, 429 with `Retry-After` when the plan's rate limit (GCRA, per tenant) is exceeded, 503 when tenant config or providers are unavailable. Unknown request fields are rejected. A response with `degraded: true` is still 200: some providers failed and results may be incomplete.
 
 ### POST /v1/search/image  (scope `search:read`, `multipart/form-data`)
 

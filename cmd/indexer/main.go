@@ -19,11 +19,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/zavisoft/search-engine/internal/catalog/centroids"
 	"github.com/zavisoft/search-engine/internal/catalog/indexer"
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
@@ -46,6 +50,11 @@ type config struct {
 	ImageTimeout    time.Duration
 	ImageFetchLimit int
 	Parallelism     int
+	S3Endpoint      string
+	S3Region        string
+	S3AccessKey     string
+	S3SecretKey     string
+	S3ModelsBucket  string
 }
 
 func loadConfig() (config, error) {
@@ -63,6 +72,11 @@ func loadConfig() (config, error) {
 		ImageTimeout:    env.Duration("INDEXER_IMAGE_TIMEOUT", 10*time.Second),
 		ImageFetchLimit: env.Int("INDEXER_IMAGE_FETCH_LIMIT", 16),
 		Parallelism:     env.Int("INDEXER_PARALLELISM", 4),
+		S3Endpoint:      env.Required("S3_ENDPOINT"),
+		S3Region:        env.String("S3_REGION", "us-east-1"),
+		S3AccessKey:     env.Required("S3_ACCESS_KEY"),
+		S3SecretKey:     env.Required("S3_SECRET_KEY"),
+		S3ModelsBucket:  env.Required("S3_BUCKET_MODELS"),
 	}
 	return c, env.Err()
 }
@@ -127,7 +141,12 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 	defer qClient.Close()
 
 	tenants := tenant.NewStore(db)
-	builder := &indexer.Builder{Tenants: tenants, Triton: triton, OpenSearch: osClient, Qdrant: qClient}
+	s3c := s3.New(s3.Options{
+		Region: cfg.S3Region, BaseEndpoint: aws.String(cfg.S3Endpoint), UsePathStyle: true,
+		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+	})
+	builder := &indexer.Builder{Tenants: tenants, Triton: triton, OpenSearch: osClient, Qdrant: qClient,
+		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket}}
 	proc := indexer.NewProcessor(indexer.NewHTTPFetcher(cfg.ImageTimeout), log, cfg.ImageFetchLimit, cfg.Parallelism)
 
 	if backfill {
@@ -168,7 +187,7 @@ func runBackfill(ctx context.Context, cfg config, tenants *tenant.Store, slug st
 		"tenant", slug, "version", rep.Version, "events", rep.Events,
 		"upserted", len(rep.Result.UpsertedIDs), "deleted", len(rep.Result.DeletedIDs), "stale", rep.Result.Stale,
 		"invalid", rep.Result.Invalid, "missing_image", rep.Result.MissingImage,
-		"expected", rep.Expected, "lexical_count", rep.LexicalCount, "vector_count", rep.VectorCount,
+		"expected", rep.Expected, "lexical_count", rep.LexicalCount, "vector_count", rep.VectorCount, "centroids", rep.Centroids,
 		"promoted", rep.Promoted, "took", rep.Duration.Round(time.Millisecond).String())
 	return err
 }

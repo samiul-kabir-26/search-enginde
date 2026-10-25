@@ -6,9 +6,13 @@ package testinfra
 
 import (
 	"context"
+	"path/filepath"
+	"runtime"
+	"sort"
 	"testing"
 
 	"github.com/testcontainers/testcontainers-go"
+	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcopensearch "github.com/testcontainers/testcontainers-go/modules/opensearch"
 	tcqdrant "github.com/testcontainers/testcontainers-go/modules/qdrant"
 	tcredpanda "github.com/testcontainers/testcontainers-go/modules/redpanda"
@@ -19,6 +23,7 @@ const (
 	OpenSearchImage = "opensearchproject/opensearch:3.9.0"
 	QdrantImage     = "qdrant/qdrant:v1.20.0"
 	RedpandaImage   = "redpandadata/redpanda:v26.2.6"
+	MySQLImage      = "mysql:8.4.13"
 )
 
 func terminate(t *testing.T, c testcontainers.Container) {
@@ -80,4 +85,29 @@ func Redpanda(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return addr
+}
+
+// MySQL starts MySQL, applies db/migrations/mysql/*.up.sql in order and returns a DSN.
+func MySQL(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	_, here, _, _ := runtime.Caller(0)
+	dir := filepath.Join(filepath.Dir(here), "..", "..", "db", "migrations", "mysql")
+	ups, err := filepath.Glob(filepath.Join(dir, "*.up.sql"))
+	if err != nil || len(ups) == 0 {
+		t.Fatalf("migrations in %s: %v", dir, err)
+	}
+	sort.Strings(ups)
+	c, err := tcmysql.Run(ctx, MySQLImage,
+		tcmysql.WithDatabase("searchengine"), tcmysql.WithUsername("search"), tcmysql.WithPassword("search"),
+		tcmysql.WithScripts(ups...))
+	terminate(t, c)
+	if err != nil {
+		t.Fatalf("start mysql: %v", err)
+	}
+	dsn, err := c.ConnectionString(ctx, "parseTime=true", "multiStatements=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dsn
 }

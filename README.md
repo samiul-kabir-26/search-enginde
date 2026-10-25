@@ -34,6 +34,17 @@ make run-indexer      # embed and index into OpenSearch and Qdrant (~7 min on CP
 make backfill         # optional: rebuild the demo index from the topic and verify counts
 ```
 
+### Text search (M2)
+
+```bash
+make run-control-api  # JWKS + POST /v1/auth/token on :8081
+make run-search-api   # POST /v1/search on :8080
+TOKEN=$(make -s token)   # exchanges the demo API key in data/demo_api_key for a JWT
+curl -s localhost:8080/v1/search -H "Authorization: Bearer $TOKEN" \
+  -d '{"q":"red leather handbag under $100","page":{"size":5},"explain":true}'
+make loadtest         # k6 at 50 RPS (target p95 <= 150 ms)
+```
+
 Product data comes from [Amazon Berkeley Objects](https://amazon-berkeley-objects.s3.amazonaws.com/index.html)
 (CC BY 4.0, credit Amazon.com); see `tools/dataprep/ATTRIBUTION.md`.
 

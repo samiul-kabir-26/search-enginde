@@ -16,7 +16,10 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/zavisoft/search-engine/internal/auth"
+	"github.com/zavisoft/search-engine/internal/controlplane"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
 const service = "control-api"
@@ -27,6 +30,9 @@ type config struct {
 	ShutdownTimeout time.Duration
 	MySQLDSN        string
 	RedisAddr       string
+	JWTSigningKey   string
+	JWTIssuer       string
+	JWTTTL          time.Duration
 	OTLPEndpoint    string
 }
 
@@ -38,6 +44,9 @@ func loadConfig() (config, error) {
 		ShutdownTimeout: env.Duration("SHUTDOWN_TIMEOUT", 15*time.Second),
 		MySQLDSN:        env.Required("MYSQL_DSN"),
 		RedisAddr:       env.Required("REDIS_ADDR"),
+		JWTSigningKey:   env.Required("JWT_SIGNING_KEY"),
+		JWTIssuer:       env.Required("JWT_ISSUER"),
+		JWTTTL:          env.Duration("JWT_TTL", 15*time.Minute),
 		OTLPEndpoint:    env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 	}
 	return c, env.Err()
@@ -90,6 +99,12 @@ func run(ctx context.Context) error {
 		"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
 	}, 2*time.Second))
 	mux.Handle("GET /metrics", tel.MetricsHandler)
+
+	signer, err := auth.NewSigner(cfg.JWTSigningKey, cfg.JWTIssuer)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	(&controlplane.Auth{Keys: tenant.NewStore(db), Signer: signer, TokenTTL: cfg.JWTTTL, Log: log}).Routes(mux)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,

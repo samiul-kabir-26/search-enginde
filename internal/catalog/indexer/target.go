@@ -9,6 +9,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/zavisoft/search-engine/internal/catalog"
+	"github.com/zavisoft/search-engine/internal/catalog/centroids"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/providers/embedder/kservev2"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
@@ -23,6 +24,8 @@ type Builder struct {
 	Triton     grpc.ClientConnInterface
 	OpenSearch *opensearchapi.Client
 	Qdrant     *qdrantgo.Client
+	// Centroids, when set, receives category centroids for every backfilled version.
+	Centroids *centroids.Store
 }
 
 // Stores are a tenant's platform stores, which can be bound to a physical version.

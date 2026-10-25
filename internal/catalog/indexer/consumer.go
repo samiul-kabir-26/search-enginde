@@ -11,6 +11,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/zavisoft/search-engine/internal/catalog"
+	"github.com/zavisoft/search-engine/internal/catalog/centroids"
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
@@ -152,6 +153,7 @@ type BackfillReport struct {
 	Expected     int
 	LexicalCount int64
 	VectorCount  int64
+	Centroids    int
 	Promoted     bool
 	Duration     time.Duration
 }
@@ -224,6 +226,17 @@ func Backfill(ctx context.Context, brokers []string, id tenant.ID, builder *Buil
 	if rep.LexicalCount != int64(rep.Expected) || rep.VectorCount != int64(rep.Expected) {
 		return rep, fmt.Errorf("count mismatch in v%d: expected %d live products, lexical %d, vector %d; not promoted",
 			rep.Version, rep.Expected, rep.LexicalCount, rep.VectorCount)
+	}
+	if builder.Centroids != nil {
+		idx, err := centroids.BuildFrom(ctx, stores.Vectors, rep.Version)
+		if err != nil {
+			return rep, fmt.Errorf("build centroids: %w", err)
+		}
+		m, err := builder.Centroids.Save(ctx, string(id), rep.Version, idx)
+		if err != nil {
+			return rep, err
+		}
+		rep.Centroids = m.Categories
 	}
 	if err := stores.promote(ctx, rep.Version); err != nil {
 		return rep, err

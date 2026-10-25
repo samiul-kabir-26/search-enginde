@@ -6,5 +6,5 @@ output [
   { name: "input_ids", data_type: TYPE_INT64, dims: [ -1, -1 ] },
   { name: "attention_mask", data_type: TYPE_INT64, dims: [ -1, -1 ] }
 ]
-parameters { key: "max_length", value: { string_value: "77" } }
+parameters { key: "max_length", value: { string_value: "64" } }
 instance_group [ { kind: KIND_CPU, count: 2 } ]

@@ -30,6 +30,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/tenant"
@@ -107,8 +108,12 @@ func run(ctx context.Context, o options) error {
 		return fmt.Errorf("mysql: %w", err)
 	}
 	defer db.Close()
-	tid, err := ensureTenant(ctx, tenant.NewStore(db), o.slug, log)
+	store := tenant.NewStore(db)
+	tid, err := ensureTenant(ctx, store, o.slug, log)
 	if err != nil {
+		return err
+	}
+	if err := ensureAPIKey(ctx, store, tid, filepath.Join(o.dataDir, "demo_api_key"), log); err != nil {
 		return err
 	}
 
@@ -187,6 +192,34 @@ func ensureTenant(ctx context.Context, store *tenant.Store, slug string, log *sl
 	}
 	log.Info("tenant created", "tenant", id, "slug", slug, "config_version", 1)
 	return id, nil
+}
+
+// ensureAPIKey creates a demo API key with every data-plane scope when the tenant has none
+// (or the saved key file is gone) and writes it to path, readable only by the owner.
+func ensureAPIKey(ctx context.Context, store *tenant.Store, tid tenant.ID, path string, log *slog.Logger) error {
+	n, err := store.CountActiveAPIKeys(ctx, tid)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(path); n > 0 && statErr == nil {
+		log.Info("demo API key exists", "file", path)
+		return nil
+	}
+	key, prefix, hash, err := auth.NewAPIKey()
+	if err != nil {
+		return err
+	}
+	if err := store.CreateAPIKey(ctx, tenant.APIKey{
+		ID: tenant.NewID().String(), TenantID: tid, Prefix: prefix, Hash: hash,
+		Scopes: []string{auth.ScopeSearchRead, auth.ScopeSearchDebug, auth.ScopeEventsWrite},
+	}); err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, []byte(key+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write api key: %w", err)
+	}
+	log.Info("demo API key created", "file", path, "prefix", prefix)
+	return nil
 }
 
 func uploadImages(ctx context.Context, cfg config, o options, products []canonicalProduct, log *slog.Logger) error {

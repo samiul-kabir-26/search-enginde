@@ -79,7 +79,11 @@ type AdsBlender interface {
 }
 ```
 
-As implemented in M1, `LexicalIndex.Upsert` and `Delete` take source-versioned documents and return the product IDs rejected as stale, because the lexical index arbitrates catalog event order (`docs/DATA.md` §6). Platform stores also implement `IndexVersions` (`Active`, `Latest`, `Create`, `Promote`, `Count`, `Drop`) for the alias-swap re-index. `Search` is added to both store interfaces with retrieval in M2.
+As implemented:
+- `LexicalIndex.Upsert` and `Delete` take source-versioned documents and return the product IDs rejected as stale, because the lexical index arbitrates catalog event order (`docs/DATA.md` §6). The indexer depends only on the write halves (`LexicalWriter`, `VectorWriter`).
+- `LexicalIndex.Search` takes base filters (always_filters, in the query) and request filters (a post-filter) separately and returns hits plus disjunctive facet counts and the filtered match count; `Docs` hydrates display fields for one page. Retrievers read only ranking fields (OpenSearch doc values, a trimmed Qdrant payload), which is 3–5x faster than loading stored documents for hundreds of hits.
+- Platform stores also implement `IndexVersions` (`Active`, `Latest`, `Create`, `Promote`, `Count`, `Drop`) for the alias-swap re-index.
+- `Providers` bundles a tenant's providers for one config version (embedders, stores, centroids, scorers); the registry builds and caches it. The filter AST lives in `internal/pipeline/filter`, the feature catalog in `internal/pipeline/feature`, and the HTTP layer of search-api in `internal/searchapi`.
 
 `Filter` (the request-level structured filter) is not an interface. It is a typed AST (`FilterExpr`) that each `VectorStore` and `LexicalIndex` adapter translates into its native filter: Qdrant payload filter, OpenSearch `bool.filter`, or a SQL `WHERE` for pgvector. Pushdown is mandatory; post-filtering structured constraints is a bug.
 
@@ -100,12 +104,13 @@ As implemented in M1, `LexicalIndex.Upsert` and `Delete` take source-versioned d
 - Retrieval fan-out uses `errgroup`. One retriever failing does not fail the stage. The stage fails only if all retrievers fail, in which case the response is an empty result with a `degraded=true` flag, never a 5xx.
 - Merge uses Reciprocal Rank Fusion: `score = Σ w_r / (k + rank_r)`, with `k=60` by default and `w_r` per retriever from config.
 - The explain trace records, per stage: provider, version, latency, input/output counts, fallback flag, and per-candidate scores (top 50).
+- Breakers (per tenant, stage and provider) trip on 10 consecutive failures, or on a failure ratio of at least 50% over at least 20 calls in 10 s, and stay open for 3 s, so a transient overload costs seconds of degraded results rather than tens. A primary that has a fallback gets 75% of the remaining budget, so the fallback can still run. Client cancellations do not count as failures.
 
 ## 6. Stage specifications
 
 ### S1 Query understanding
 
-- Text: normalize (Unicode NFKC, lowercase, whitespace collapse). Extract attributes (color, material, size, price phrases) with a tenant-extensible dictionary. Predict the category by kNN vote over the category centroids of the text embedding.
+- Text: normalize (Unicode NFKC, lowercase, whitespace collapse). Extract attributes (color, material, size, price phrases) with a tenant-extensible dictionary. Price phrases become a pushdown `price_minor` filter. Predict the category by kNN vote over the category centroids of the text embedding (top 3 by a softmax over cosine similarity, confidence ≥ 0.15). An embedder failure skips the vector retrievers for that request and is reported as a fallback.
 - Image: validate via `internal/imaging` (see §9), apply the optional crop box, embed the image, and predict the category by majority vote over the categories of the top-50 image neighbors.
 - Output is a `Query` struct: normalized text, attributes, predicted categories with confidence, embeddings per vector name, request filters, user context.
 
@@ -130,8 +135,8 @@ Each retriever gets `k` from config (default 500, max 2000).
 ### S4 Pre-rank
 
 - An in-process ONNX scorer, or `default_linear` if none is configured.
-- Features come from the candidate payload, retrieval scores and Redis item features.
-- Keeps the top `prerank.keep` (default 300).
+- Features come from the candidate payload, retrieval scores and Redis item features, normalized per request: `rrf_score` and `bm25_norm` divide by the request maximum, cosines are used as returned, counts and prices are log-scaled.
+- Keeps the top `prerank.keep` (default 300). Candidates that are cut stay behind in RRF order, and those cut by S5 stay in pre-rank order, so deep pages (up to the plan's page depth) follow pre-rank and then RRF order.
 
 ### S5 Rank
 
@@ -205,7 +210,7 @@ Each retriever gets `k` from config (default 500, max 2000).
 - Metrics:
   - `search_request_duration_seconds{tenant,query_type}`
   - `search_stage_duration_seconds{tenant,stage,provider}`
-  - `search_stage_fallback_total`
+  - `search_stage_fallback_total{tenant,stage,provider,reason}`
   - `search_results_empty_total`
   - `provider_breaker_state`
 - Logs: one structured access log per request with the trace ID. Query text is logged only if the tenant enables it.

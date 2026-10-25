@@ -29,8 +29,8 @@ type Target struct {
 	TextEmbedder pipeline.Embedder
 	// ImageEmbedder fills the `image` vector from the main image; nil skips image vectors.
 	ImageEmbedder pipeline.Embedder
-	Lexical       pipeline.LexicalIndex
-	Vectors       pipeline.VectorStore
+	Lexical       pipeline.LexicalWriter
+	Vectors       pipeline.VectorWriter
 }
 
 // ImageFetcher downloads a product image.

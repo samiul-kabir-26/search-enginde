@@ -148,9 +148,11 @@ test-integration: ## Run integration tests (testcontainers; needs Docker)
 	go test -race -count=1 -tags integration ./...
 
 .PHONY: cover
-cover: ## Unit test coverage report
-	go test -count=1 -coverprofile=coverage.out ./...
-	go tool cover -func=coverage.out | tail -1
+cover: ## Coverage for the packages with an 80% target (unit + integration tests)
+	go test -tags integration -count=1 -coverprofile=coverage.out \
+		-coverpkg=$$(go list ./internal/pipeline/... ./internal/stages/... ./internal/tenant/... | grep -v -E 'stagestest|tenantdb' | paste -sd, -) \
+		./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/searchapi/...
+	@go tool cover -func=coverage.out | tail -1
 
 ##@ Run
 
@@ -165,6 +167,15 @@ run-control-api: .env ## Run control-api locally against the Compose stack
 .PHONY: run-indexer
 run-indexer: .env ## Run the streaming indexer (consumer group) against the Compose stack
 	@$(ENV_LOAD) go run ./cmd/indexer
+
+.PHONY: centroids
+centroids: .env ## Rebuild category centroids for a tenant's active index (TENANT=demo)
+	@$(ENV_LOAD) go run ./cmd/featurejob centroids -tenant $(or $(TENANT),demo)
+
+.PHONY: token
+token: .env ## Print a JWT for the demo API key (needs `make run-control-api`)
+	@curl -fsS -X POST http://localhost:8081/v1/auth/token -H 'Content-Type: application/json' \
+		-d "{\"api_key\":\"$$(cat data/demo_api_key)\"}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])'
 
 .PHONY: backfill
 backfill: .env ## Rebuild a tenant index from the catalog topic and swap aliases (TENANT=demo)
@@ -194,5 +205,5 @@ eval: ## Run offline eval suites against the running stack (M10)
 	cd tools && $(UV_RUN) python -m eval.run
 
 .PHONY: loadtest
-loadtest: ## Run k6 load tests (M10)
-	k6 run loadtest/search_text.js
+loadtest: ## Run the k6 text search load test at 50 RPS (needs search-api and control-api running)
+	SEARCH_TOKEN=$$($(MAKE) -s token) k6 run loadtest/search_text.js
