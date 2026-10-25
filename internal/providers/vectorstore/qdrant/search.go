@@ -11,6 +11,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 )
 
 // Search runs a filtered kNN query on one named vector. Filters are pushed down as a Qdrant
@@ -19,18 +20,18 @@ func (s *Store) Search(ctx context.Context, req pipeline.VectorSearch) ([]pipeli
 	if len(req.Query) == 0 || req.K <= 0 {
 		return nil, nil
 	}
-	f, err := Translate(req.Filter)
+	f, err := translate(req.Filter, s.spec.Field)
 	if err != nil {
 		return nil, err
 	}
-	limit, using := uint64(req.K), req.Vector
+	limit, using := uint64(req.K), s.vector(req.Vector)
 	q := &qdrant.QueryPoints{
 		CollectionName: s.target,
 		Query:          qdrant.NewQueryDense(req.Query),
 		Using:          &using,
 		Filter:         f,
 		Limit:          &limit,
-		WithPayload:    qdrant.NewWithPayloadInclude(payloadFields...),
+		WithPayload:    qdrant.NewWithPayloadInclude(s.payloadFields()...),
 	}
 	if req.EF > 0 {
 		ef := uint64(req.EF)
@@ -42,7 +43,7 @@ func (s *Store) Search(ctx context.Context, req pipeline.VectorSearch) ([]pipeli
 	}
 	hits := make([]pipeline.Hit, 0, len(points))
 	for _, p := range points {
-		id, doc := docFromPayload(p.GetPayload())
+		id, doc := docFromPayload(p.GetPayload(), s.spec)
 		if id == "" {
 			continue
 		}
@@ -51,40 +52,58 @@ func (s *Store) Search(ctx context.Context, req pipeline.VectorSearch) ([]pipeli
 	return hits, nil
 }
 
-// payloadFields are what ranking needs; display fields are hydrated per page from the lexical
-// index, so they are not read for hundreds of hits.
-var payloadFields = []string{
-	"product_id", "vendor_id", "price_minor", "category_ids", "rating", "rating_count",
-	"listing_completeness", "image_count", "created_at",
+// payloadFields are the stored names of what ranking needs (vectorstore.RankingFields);
+// display fields are hydrated per page from the lexical index, so they are not read for
+// hundreds of hits.
+func (s *Store) payloadFields() []string {
+	out := make([]string, len(vectorstore.RankingFields))
+	for i, f := range vectorstore.RankingFields {
+		out[i] = s.spec.Field(f)
+	}
+	return out
 }
 
-func docFromPayload(p map[string]*qdrant.Value) (string, *pipeline.Doc) {
-	str := func(k string) string { return p[k].GetStringValue() }
+func docFromPayload(p map[string]*qdrant.Value, spec vectorstore.Spec) (string, *pipeline.Doc) {
+	get := func(k string) *qdrant.Value { return p[spec.Field(k)] }
+	str := func(k string) string { return get(k).GetStringValue() }
+	num := func(k string) float64 {
+		if v := get(k); v.GetKind() != nil {
+			if _, isInt := v.GetKind().(*qdrant.Value_IntegerValue); isInt {
+				return float64(v.GetIntegerValue())
+			}
+		}
+		return get(k).GetDoubleValue()
+	}
 	d := &pipeline.Doc{
 		Title: str("title"), Brand: str("brand"), VendorID: str("vendor_id"), Currency: str("currency"),
-		ImageURL: str("image_url"), PriceMinor: p["price_minor"].GetIntegerValue(),
-		RatingCount: p["rating_count"].GetIntegerValue(), ImageCount: int(p["image_count"].GetIntegerValue()),
-		ListingCompleteness: p["listing_completeness"].GetDoubleValue(),
+		ImageURL: str("image_url"), PriceMinor: get("price_minor").GetIntegerValue(),
+		RatingCount: get("rating_count").GetIntegerValue(), ImageCount: int(get("image_count").GetIntegerValue()),
+		ListingCompleteness: num("listing_completeness"),
 	}
-	if v, ok := p["rating"]; ok {
-		r := v.GetDoubleValue()
+	if v := get("rating"); v != nil {
+		r := num("rating")
 		d.Rating = &r
 	}
-	for _, v := range p["category_ids"].GetListValue().GetValues() {
+	for _, v := range get("category_ids").GetListValue().GetValues() {
 		d.CategoryIDs = append(d.CategoryIDs, v.GetStringValue())
 	}
 	if t, err := time.Parse(time.RFC3339, str("created_at")); err == nil {
 		d.CreatedAt = &t
 	}
-	return str("product_id"), d
+	return str(vectorstore.ProductIDField), d
 }
 
 // Translate converts a compiled filter to a Qdrant payload filter (nil matches everything).
 func Translate(e filter.Expr) (*qdrant.Filter, error) {
+	return translate(e, func(f string) string { return f })
+}
+
+// translate is Translate with field names mapped to stored names.
+func translate(e filter.Expr, field func(string) string) (*qdrant.Filter, error) {
 	if e.IsZero() {
 		return nil, nil
 	}
-	c, err := condition(e)
+	c, err := condition(e, field)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +113,7 @@ func Translate(e filter.Expr) (*qdrant.Filter, error) {
 	return &qdrant.Filter{Must: []*qdrant.Condition{c}}, nil
 }
 
-func condition(e filter.Expr) (*qdrant.Condition, error) {
+func condition(e filter.Expr, field func(string) string) (*qdrant.Condition, error) {
 	switch {
 	case e.And != nil || e.Or != nil:
 		kids := e.And
@@ -103,7 +122,7 @@ func condition(e filter.Expr) (*qdrant.Condition, error) {
 		}
 		conds := make([]*qdrant.Condition, 0, len(kids))
 		for _, k := range kids {
-			c, err := condition(k)
+			c, err := condition(k, field)
 			if err != nil {
 				return nil, err
 			}
@@ -114,7 +133,9 @@ func condition(e filter.Expr) (*qdrant.Condition, error) {
 		}
 		return qdrant.NewFilterAsCondition(&qdrant.Filter{Should: conds}), nil
 	case e.Cond != nil:
-		return leaf(*e.Cond)
+		c := *e.Cond
+		c.Field = field(c.Field)
+		return leaf(c)
 	}
 	return nil, fmt.Errorf("empty filter expression")
 }
@@ -241,19 +262,20 @@ func toInts(vs []any) []int64 {
 func (s *Store) ScrollVectors(ctx context.Context, v int, vector string, fn func(productID string, vec []float32, categories []string) error) error {
 	limit := uint32(512)
 	var offset *qdrant.PointId
+	pid, cats, stored := s.spec.Field(vectorstore.ProductIDField), s.spec.Field("category_ids"), s.vector(vector)
 	for {
 		points, next, err := s.client.ScrollAndOffset(ctx, &qdrant.ScrollPoints{
 			CollectionName: s.CollectionName(v),
 			Offset:         offset,
 			Limit:          &limit,
-			WithPayload:    qdrant.NewWithPayloadInclude("product_id", "category_ids"),
-			WithVectors:    qdrant.NewWithVectorsInclude(vector),
+			WithPayload:    qdrant.NewWithPayloadInclude(pid, cats),
+			WithVectors:    qdrant.NewWithVectorsInclude(stored),
 		})
 		if err != nil {
 			return fmt.Errorf("scroll %s: %w", s.CollectionName(v), err)
 		}
 		for _, p := range points {
-			out := p.GetVectors().GetVectors().GetVectors()[vector]
+			out := p.GetVectors().GetVectors().GetVectors()[stored]
 			vec := out.GetDense().GetData()
 			if len(vec) == 0 {
 				vec = out.GetData() //nolint:staticcheck // servers before the dense field fill data
@@ -261,11 +283,11 @@ func (s *Store) ScrollVectors(ctx context.Context, v int, vector string, fn func
 			if len(vec) == 0 {
 				continue
 			}
-			var cats []string
-			for _, c := range p.GetPayload()["category_ids"].GetListValue().GetValues() {
-				cats = append(cats, c.GetStringValue())
+			var categories []string
+			for _, c := range p.GetPayload()[cats].GetListValue().GetValues() {
+				categories = append(categories, c.GetStringValue())
 			}
-			if err := fn(p.GetPayload()["product_id"].GetStringValue(), vec, cats); err != nil {
+			if err := fn(p.GetPayload()[pid].GetStringValue(), vec, categories); err != nil {
 				return err
 			}
 		}
@@ -282,7 +304,7 @@ func (s *Store) Get(ctx context.Context, productID string) (*pipeline.VectorPoin
 		CollectionName: s.target,
 		Ids:            []*qdrant.PointId{qdrant.NewID(catalog.PointID(productID))},
 		WithVectors:    qdrant.NewWithVectors(true),
-		WithPayload:    qdrant.NewWithPayloadInclude(payloadFields...),
+		WithPayload:    qdrant.NewWithPayloadInclude(s.payloadFields()...),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("get %s from %s: %w", productID, s.target, err)
@@ -291,14 +313,19 @@ func (s *Store) Get(ctx context.Context, productID string) (*pipeline.VectorPoin
 		return nil, nil, fmt.Errorf("product %s: %w", productID, pipeline.ErrNotFound)
 	}
 	p := points[0]
+	stored := p.GetVectors().GetVectors().GetVectors()
 	vecs := map[string][]float32{}
-	for name, out := range p.GetVectors().GetVectors().GetVectors() {
+	for _, name := range []string{pipeline.VectorText, pipeline.VectorImage} {
+		out, ok := stored[s.vector(name)]
+		if !ok {
+			continue
+		}
 		v := out.GetDense().GetData()
 		if len(v) == 0 {
 			v = out.GetData() //nolint:staticcheck // servers before the dense field fill data
 		}
 		vecs[name] = v
 	}
-	_, doc := docFromPayload(p.GetPayload())
+	_, doc := docFromPayload(p.GetPayload(), s.spec)
 	return &pipeline.VectorPoint{ProductID: productID, Vectors: vecs}, doc, nil
 }

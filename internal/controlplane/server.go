@@ -14,6 +14,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/registry"
 	"github.com/zavisoft/search-engine/internal/tenant"
 	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 )
@@ -41,7 +42,11 @@ type Server struct {
 	SecureCookies bool
 	// PlatformEmbedder describes platform models for config validation.
 	PlatformEmbedder func(id string) (tenant.EmbedderInfo, bool)
-	Log              *slog.Logger
+	// BYO builds and probes tenant endpoints (secrets, egress) for models and connections.
+	BYO *registry.BYO
+	Log *slog.Logger
+
+	probes probeCache
 }
 
 // Routes registers every control-api route.
@@ -52,6 +57,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	s.onboardingRoutes(mux)
 	s.catalogRoutes(mux)
 	s.playgroundRoutes(mux)
+	s.byoRoutes(mux)
 	s.adminRoutes(mux)
 }
 

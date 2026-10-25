@@ -138,13 +138,20 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
 { "provider": "byo", "connection_id": "01J...", "collection": "products", "vectors": { "text": { "name": "text", "dim": 384, "metric": "cosine" }, "image": { "name": "image", "dim": 512, "metric": "cosine" } }, "payload_mapping": { "product_id": "pid", "vendor_id": "vendor" } }
 ```
 
+`stores.vector` only: the lexical index is platform-hosted in v1 (`stores.lexical.provider: "byo"` fails with `byo_unavailable`). The block references a validated connection (`POST /connections`, then `/test`) and describes the tenant's own collection, which the tenant creates and the indexer writes into in place (`docs/DATA.md` §6):
+- `collection`: the Qdrant or Milvus collection, or the pgvector table (`[schema.]table`).
+- `vectors`: the pipeline vectors the store holds, `text` and/or `image`, each `{name, dim, metric}`. `name` is the store's vector field (default: the pipeline name), `metric` is `cosine`, `dot` or `l2`. The configured retrievers decide which are required: `vector_text` needs `text`; `vector_image` and `vector_text_to_image` need `image`.
+- `payload_mapping`: canonical payload field → store field (`product_id`, `vendor_id`, `brand`, `custom.season`, …); unmapped fields keep their canonical names. `product_id` is the key: the point payload in Qdrant, the primary-key column in pgvector, a field in Milvus (best as the primary key). Milvus field names cannot contain dots, so map `custom.*` fields there.
+- Filters are always pushed down, so every `always_filters` field must be stored (any field in Qdrant and in Milvus with the dynamic field enabled; a column in pgvector; a schema field otherwise). Request filters on fields the store lacks fail the vector retrievers, which then fall back to the lexical index; the connection test lists such fields.
+- Scores are higher-is-better: cosine similarity, inner product, or negated L2 distance.
+
 **BYO embedder:**
 
 ```json
 { "provider": "byo", "model_id": "01J..." }
 ```
 
-The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embeddings`.
+The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v2` or `openai_embeddings`. Its `input_schema.modality` (`text` or `image`) decides the role it can fill; an image model with `supports_text_to_image` also serves `vector_text_to_image` through its text tower (`INPUT_TEXT`), and `output_schema.dim` is checked against the store.
 
 **Scorers:**
 
@@ -173,9 +180,9 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 2. The sum of stage budgets must be ≤ `total_ms`. Both rules also apply to the effective image budgets (`budgets.image` over the text budgets).
 
 **Embedders and stores**
-3. Embedder output dimension must equal the corresponding vector store `dim`. Checked via a live embed of a fixed probe input.
-4. The `metric` must be supported by the adapter.
-5. Every `connection_id` and `model_id` must exist, belong to the tenant, and have `status = validated`.
+3. Embedder output dimension must equal the corresponding vector store `dim`. Checked via a live embed of a fixed probe input (`probe_failed`, `dim_mismatch`) and a live describe of the BYO collection.
+4. The `metric` must be supported by the adapter (`unsupported_metric`) and match the collection's index (`metric_mismatch`).
+5. Every `connection_id` and `model_id` must exist, belong to the tenant, and have `status = validated` (`not_found`, `model_not_validated`, `connection_not_validated`, `wrong_kind`).
 
 **Retrieval**
 6. Retrievers must be known for the query type, listed once, with `k` in `[1, 2000]` and `weight` in `(0, 5]`; `rrf_k` > 0. Retrievers referenced must be available given the configured embedders and stores. For example, `vector_text_to_image` requires the image embedder to expose a text tower: `clip-vit-b32` does; a BYO embedder must declare `supports_text_to_image: true`.
@@ -202,6 +209,8 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 
 **Facets**
 15. Facet fields must be facetable; numeric facets need `ranges`, keyword facets cannot have them; at most 20 facets, `size` ≤ 100.
+
+Rules 3–5 probe the tenant's endpoints when a draft is saved or validated and when it is published (5 s per probe; successful probes are remembered for 30 s, failures are always re-probed). BYO providers also need a plan with `byo_allowed` (`plan_forbids_byo`).
 
 The validation response returns every error, not just the first: `[{ "path": "/rank/scorer/model_id", "code": "model_not_validated", "message": "..." }]`.
 

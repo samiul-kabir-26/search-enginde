@@ -821,6 +821,7 @@ paths:
       operationId: updateConnection
       tags: [connections]
       summary: Update a connection
+      description: A connection serving the active or shadow version is tested with the new settings first and saved only if the test passes (422 otherwise); any other connection is saved as untested.
       parameters:
       - name: tid
         in: path
@@ -846,6 +847,7 @@ paths:
       operationId: deleteConnection
       tags: [connections]
       summary: Delete a connection
+      description: 409 while the draft or a non-retired config version references it.
       parameters:
       - name: tid
         in: path
@@ -872,6 +874,11 @@ paths:
         in: path
         required: true
         schema: {type: string}
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ConnectionTestRequest'}
       responses:
         '200':
           description: OK
@@ -880,10 +887,33 @@ paths:
               schema: {$ref: '#/components/schemas/ConnectionTestResult'}
         4XX: {$ref: '#/components/responses/Problem'}
   /v1/tenants/{tid}/models:
+    get:
+      operationId: listModels
+      tags: [models]
+      summary: List registered models
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Model'}
+        4XX: {$ref: '#/components/responses/Problem'}
     post:
       operationId: registerModel
       tags: [models]
-      summary: Register a remote model or an uploaded ONNX artifact
+      summary: Register a remote embedder (ONNX artifacts arrive in M7)
       parameters:
       - name: tid
         in: path
@@ -906,7 +936,7 @@ paths:
     post:
       operationId: createModelUpload
       tags: [models]
-      summary: Presigned S3 PUT for an ONNX artifact
+      summary: Presigned S3 PUT for an ONNX artifact (served from M7)
       parameters:
       - name: tid
         in: path
@@ -923,6 +953,27 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/PresignedUpload'}
+        4XX: {$ref: '#/components/responses/Problem'}
+  /v1/tenants/{tid}/models/{model_id}:
+    get:
+      operationId: getModel
+      tags: [models]
+      summary: Get a registered model
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      - name: model_id
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Model'}
         4XX: {$ref: '#/components/responses/Problem'}
   /v1/tenants/{tid}/models/{model_id}/validate:
     post:
@@ -950,6 +1001,7 @@ paths:
       operationId: listPlatformModels
       tags: [models]
       summary: Catalog of platform pre-trained models
+      security: []
       responses:
         '200':
           description: OK
@@ -1630,10 +1682,12 @@ components:
       required: [from, to, changes]
     SecretCreate:
       type: object
+      description: The value is encrypted at rest (SecretStore) and never returned or logged.
       properties:
-        kind: {type: string}
-        value: {type: string, writeOnly: true}
+        kind: {type: string, pattern: '^[a-z][a-z0-9_-]{0,63}$', description: 'For example api_key, password or token'}
+        value: {type: string, writeOnly: true, minLength: 1, maxLength: 4096}
       required: [kind, value]
+      additionalProperties: false
     SecretRef:
       type: object
       properties:
@@ -1641,89 +1695,158 @@ components:
       required: [secret_ref]
     ConnectionInput:
       type: object
+      description: |
+        A BYO vector store. The endpoint must pass the egress policy (https for qdrant and milvus, a postgres
+        URL with sslmode=require, verify-ca or verify-full for pgvector; public addresses only; the plan's
+        host allowlist). Credentials go in a secret: the Qdrant API key, the PostgreSQL password, or the
+        Milvus password (with settings.username) or token. BYO lexical stores are not supported in v1.
       properties:
         kind:
           type: string
-          enum: [vector_store, lexical]
+          enum: [vector_store]
         type:
           type: string
-          enum: [qdrant, pgvector, milvus, opensearch]
-        endpoint: {type: string, format: uri}
+          enum: [qdrant, pgvector, milvus]
+        endpoint: {type: string, format: uri, examples: ['https://qdrant.example.com:6334', 'postgres://search@db.example.com:5432/catalog?sslmode=verify-full']}
         secret_ref: {type: string}
-        settings: {type: object, additionalProperties: true}
+        settings:
+          type: object
+          additionalProperties: false
+          properties:
+            username: {type: string, description: Milvus user (the password is the secret)}
+            database: {type: string, description: Milvus database}
       required: [kind, type, endpoint]
+      additionalProperties: false
+    ConnectionTestRequest:
+      type: object
+      description: The collection to test; when omitted, the draft's stores.vector block (which must use this connection).
+      properties:
+        collection: {type: string}
+        vectors:
+          type: object
+          additionalProperties: {$ref: '#/components/schemas/VectorSpec'}
+        payload_mapping:
+          type: object
+          additionalProperties: {type: string}
+      additionalProperties: false
+    VectorSpec:
+      type: object
+      properties:
+        name: {type: string, description: The store's vector field (defaults to the pipeline vector name)}
+        dim: {type: integer, minimum: 1}
+        metric: {type: string, enum: [cosine, dot, l2]}
+      required: [dim, metric]
     Connection:
       allOf:
       - {$ref: '#/components/schemas/ConnectionInput'}
       - type: object
         properties:
           id: {type: string}
-          status: {type: string}
+          status:
+            type: string
+            enum: [untested, validated, failed]
+            description: A config version can reference only a validated connection
           last_tested_at:
             type: [string, 'null']
             format: date-time
           last_error:
             type: [string, 'null']
+          created_at: {type: string, format: date-time}
+          updated_at: {type: string, format: date-time}
         required: [id, status]
     ConnectionTestResult:
       type: object
+      description: 'Checks in order: configure, health, collection, vectors (dimensions and metrics as declared and supported), fields (product ID and always-on filter fields stored), sample_query. The result becomes the connection status.'
       properties:
         ok: {type: boolean}
         checks:
           type: array
-          items:
-            type: object
-            properties:
-              name: {type: string}
-              ok: {type: boolean}
-              message: {type: string}
-              latency_ms: {type: number}
-            required: [name, ok]
+          items: {$ref: '#/components/schemas/ProbeCheck'}
       required: [ok, checks]
+    ProbeCheck:
+      type: object
+      properties:
+        name: {type: string}
+        ok: {type: boolean}
+        message: {type: string}
+        latency_ms: {type: number}
+      required: [name, ok]
     ModelInput:
       type: object
+      description: |
+        A remote embedder. kserve_v2 models follow docs/MODELS.md §1 (INPUT_TEXT or INPUT_IMAGE BYTES [N] in,
+        EMBEDDING FP32 [N, D] out, L2-normalized); name and version are the KServe model name and version. For
+        openai_embeddings, name is the `model` field of POST {endpoint}/v1/embeddings (text only). Prerank, rank
+        and rerank models and ONNX artifacts arrive with learned ranking (M7).
       properties:
         kind:
           type: string
-          enum: [embedder, prerank, rank, rerank]
+          enum: [embedder]
         type:
           type: string
-          enum: [onnx, kserve_v2, openai_embeddings]
+          enum: [kserve_v2, openai_embeddings]
+        name: {type: string, maxLength: 255}
+        version: {type: string, maxLength: 64}
+        endpoint: {type: string, format: uri}
+        secret_ref: {type: string, description: Sent as a bearer token}
+        supports_text_to_image: {type: boolean, description: An image model whose text tower (INPUT_TEXT) embeds into the same space}
+        max_batch_size: {type: integer, minimum: 0, maximum: 1024}
+        input_schema:
+          type: object
+          properties:
+            modality: {type: string, enum: [text, image]}
+          required: [modality]
+          additionalProperties: false
+        output_schema:
+          type: object
+          properties:
+            dim: {type: integer, minimum: 1, maximum: 8192}
+          required: [dim]
+          additionalProperties: false
+      required: [kind, type, name, version, endpoint, input_schema, output_schema]
+      additionalProperties: false
+    Model:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string}
+        type: {type: string}
         name: {type: string}
         version: {type: string}
-        endpoint: {type: string, format: uri}
-        artifact_uri: {type: string}
+        endpoint: {type: string}
         secret_ref: {type: string}
         supports_text_to_image: {type: boolean}
         max_batch_size: {type: integer}
-        input_schema: {type: object, additionalProperties: true}
-        output_schema: {type: object, additionalProperties: true}
-      required: [kind, type, name, version, input_schema, output_schema]
-    Model:
-      allOf:
-      - {$ref: '#/components/schemas/ModelInput'}
-      - type: object
-        properties:
-          id: {type: string}
-          status: {type: string}
-          artifact_sha256: {type: string}
-          validated_at:
-            type: [string, 'null']
-            format: date-time
-        required: [id, status]
+        transport:
+          type: string
+          enum: [grpc, rest]
+          description: kserve_v2 transport detected by validation (gRPC, else REST)
+        input_schema:
+          type: object
+          properties:
+            modality: {type: string}
+        output_schema:
+          type: object
+          properties:
+            dim: {type: integer}
+        status:
+          type: string
+          enum: [registered, validated, failed]
+        validated_at:
+          type: [string, 'null']
+          format: date-time
+        last_error:
+          type: [string, 'null']
+        created_at: {type: string, format: date-time}
+      required: [id, kind, type, name, status]
     ModelValidation:
       type: object
+      description: 'Probe inferences: text (two texts), image (a small JPEG) and text_to_image as the modality calls for; each output must be [N, dim] and L2-normalized. The result becomes the model status.'
       properties:
         ok: {type: boolean}
         checks:
           type: array
-          items:
-            type: object
-            properties:
-              name: {type: string}
-              ok: {type: boolean}
-              message: {type: string}
-            required: [name, ok]
+          items: {$ref: '#/components/schemas/ProbeCheck'}
         latency_ms: {type: number}
       required: [ok, checks]
     PlatformModel:
@@ -1731,9 +1854,11 @@ components:
       properties:
         id: {type: string}
         kind: {type: string}
+        modality: {type: string, enum: [text, image]}
         dim: {type: integer}
+        supports_text_to_image: {type: boolean}
         description: {type: string}
-      required: [id, kind]
+      required: [id, kind, modality, dim]
     UploadRequest:
       type: object
       properties:

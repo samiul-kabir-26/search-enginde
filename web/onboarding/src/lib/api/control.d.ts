@@ -611,10 +611,16 @@ export interface paths {
         };
         /** Get a connection */
         get: operations["getConnection"];
-        /** Update a connection */
+        /**
+         * Update a connection
+         * @description A connection serving the active or shadow version is tested with the new settings first and saved only if the test passes (422 otherwise); any other connection is saved as untested.
+         */
         put: operations["updateConnection"];
         post?: never;
-        /** Delete a connection */
+        /**
+         * Delete a connection
+         * @description 409 while the draft or a non-retired config version references it.
+         */
         delete: operations["deleteConnection"];
         options?: never;
         head?: never;
@@ -645,9 +651,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List registered models */
+        get: operations["listModels"];
         put?: never;
-        /** Register a remote model or an uploaded ONNX artifact */
+        /** Register a remote embedder (ONNX artifacts arrive in M7) */
         post: operations["registerModel"];
         delete?: never;
         options?: never;
@@ -664,8 +671,25 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Presigned S3 PUT for an ONNX artifact */
+        /** Presigned S3 PUT for an ONNX artifact (served from M7) */
         post: operations["createModelUpload"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/tenants/{tid}/models/{model_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a registered model */
+        get: operations["getModel"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1141,81 +1165,153 @@ export interface components {
                 to?: unknown;
             }[];
         };
+        /** @description The value is encrypted at rest (SecretStore) and never returned or logged. */
         SecretCreate: {
+            /** @description For example api_key, password or token */
             kind: string;
             value: string;
         };
         SecretRef: {
             secret_ref: string;
         };
+        /**
+         * @description A BYO vector store. The endpoint must pass the egress policy (https for qdrant and milvus, a postgres
+         *     URL with sslmode=require, verify-ca or verify-full for pgvector; public addresses only; the plan's
+         *     host allowlist). Credentials go in a secret: the Qdrant API key, the PostgreSQL password, or the
+         *     Milvus password (with settings.username) or token. BYO lexical stores are not supported in v1.
+         */
         ConnectionInput: {
             /** @enum {string} */
-            kind: "vector_store" | "lexical";
+            kind: "vector_store";
             /** @enum {string} */
-            type: "qdrant" | "pgvector" | "milvus" | "opensearch";
-            /** Format: uri */
+            type: "qdrant" | "pgvector" | "milvus";
+            /**
+             * Format: uri
+             * @example https://qdrant.example.com:6334
+             * @example postgres://search@db.example.com:5432/catalog?sslmode=verify-full
+             */
             endpoint: string;
             secret_ref?: string;
             settings?: {
-                [key: string]: unknown;
+                /** @description Milvus user (the password is the secret) */
+                username?: string;
+                /** @description Milvus database */
+                database?: string;
             };
+        };
+        /** @description The collection to test; when omitted, the draft's stores.vector block (which must use this connection). */
+        ConnectionTestRequest: {
+            collection?: string;
+            vectors?: {
+                [key: string]: components["schemas"]["VectorSpec"];
+            };
+            payload_mapping?: {
+                [key: string]: string;
+            };
+        };
+        VectorSpec: {
+            /** @description The store's vector field (defaults to the pipeline vector name) */
+            name?: string;
+            dim: number;
+            /** @enum {string} */
+            metric: "cosine" | "dot" | "l2";
         };
         Connection: components["schemas"]["ConnectionInput"] & {
             id: string;
-            status: string;
+            /**
+             * @description A config version can reference only a validated connection
+             * @enum {string}
+             */
+            status: "untested" | "validated" | "failed";
             /** Format: date-time */
             last_tested_at?: string | null;
             last_error?: string | null;
+            /** Format: date-time */
+            created_at?: string;
+            /** Format: date-time */
+            updated_at?: string;
         };
+        /** @description Checks in order: configure, health, collection, vectors (dimensions and metrics as declared and supported), fields (product ID and always-on filter fields stored), sample_query. The result becomes the connection status. */
         ConnectionTestResult: {
             ok: boolean;
-            checks: {
-                name: string;
-                ok: boolean;
-                message?: string;
-                latency_ms?: number;
-            }[];
+            checks: components["schemas"]["ProbeCheck"][];
         };
+        ProbeCheck: {
+            name: string;
+            ok: boolean;
+            message?: string;
+            latency_ms?: number;
+        };
+        /**
+         * @description A remote embedder. kserve_v2 models follow docs/MODELS.md §1 (INPUT_TEXT or INPUT_IMAGE BYTES [N] in,
+         *     EMBEDDING FP32 [N, D] out, L2-normalized); name and version are the KServe model name and version. For
+         *     openai_embeddings, name is the `model` field of POST {endpoint}/v1/embeddings (text only). Prerank, rank
+         *     and rerank models and ONNX artifacts arrive with learned ranking (M7).
+         */
         ModelInput: {
             /** @enum {string} */
-            kind: "embedder" | "prerank" | "rank" | "rerank";
+            kind: "embedder";
             /** @enum {string} */
-            type: "onnx" | "kserve_v2" | "openai_embeddings";
+            type: "kserve_v2" | "openai_embeddings";
             name: string;
             version: string;
             /** Format: uri */
-            endpoint?: string;
-            artifact_uri?: string;
+            endpoint: string;
+            /** @description Sent as a bearer token */
             secret_ref?: string;
+            /** @description An image model whose text tower (INPUT_TEXT) embeds into the same space */
             supports_text_to_image?: boolean;
             max_batch_size?: number;
             input_schema: {
-                [key: string]: unknown;
+                /** @enum {string} */
+                modality: "text" | "image";
             };
             output_schema: {
-                [key: string]: unknown;
+                dim: number;
             };
         };
-        Model: components["schemas"]["ModelInput"] & {
+        Model: {
             id: string;
-            status: string;
-            artifact_sha256?: string;
+            kind: string;
+            type: string;
+            name: string;
+            version?: string;
+            endpoint?: string;
+            secret_ref?: string;
+            supports_text_to_image?: boolean;
+            max_batch_size?: number;
+            /**
+             * @description kserve_v2 transport detected by validation (gRPC, else REST)
+             * @enum {string}
+             */
+            transport?: "grpc" | "rest";
+            input_schema?: {
+                modality?: string;
+            };
+            output_schema?: {
+                dim?: number;
+            };
+            /** @enum {string} */
+            status: "registered" | "validated" | "failed";
             /** Format: date-time */
             validated_at?: string | null;
+            last_error?: string | null;
+            /** Format: date-time */
+            created_at?: string;
         };
+        /** @description Probe inferences: text (two texts), image (a small JPEG) and text_to_image as the modality calls for; each output must be [N, dim] and L2-normalized. The result becomes the model status. */
         ModelValidation: {
             ok: boolean;
-            checks: {
-                name: string;
-                ok: boolean;
-                message?: string;
-            }[];
+            checks: components["schemas"]["ProbeCheck"][];
             latency_ms?: number;
         };
         PlatformModel: {
             id: string;
             kind: string;
-            dim?: number;
+            /** @enum {string} */
+            modality: "text" | "image";
+            dim: number;
+            supports_text_to_image?: boolean;
             description?: string;
         };
         UploadRequest: {
@@ -2590,7 +2686,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["ConnectionTestRequest"];
+            };
+        };
         responses: {
             /** @description OK */
             200: {
@@ -2599,6 +2699,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    listModels: {
+        parameters: {
+            query?: {
+                limit?: components["parameters"]["Limit"];
+            };
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["Model"][];
+                    };
                 };
             };
             "4XX": components["responses"]["Problem"];
@@ -2656,6 +2783,30 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresignedUpload"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    getModel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Model"];
                 };
             };
             "4XX": components["responses"]["Problem"];

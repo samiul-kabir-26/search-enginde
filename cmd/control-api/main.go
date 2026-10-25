@@ -50,6 +50,8 @@ type config struct {
 	S3SecretKey      string
 	S3UploadBucket   string
 	OTLPEndpoint     string
+	Secrets          security.SecretBackend
+	EgressTrusted    string
 }
 
 func loadConfig() (config, error) {
@@ -73,6 +75,8 @@ func loadConfig() (config, error) {
 		S3SecretKey:      env.Required("S3_SECRET_KEY"),
 		S3UploadBucket:   env.Required("S3_BUCKET_UPLOADS"),
 		OTLPEndpoint:     env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		Secrets:          security.SecretBackendFromEnv(env),
+		EgressTrusted:    env.String("EGRESS_TRUSTED_HOSTS", ""),
 	}
 	return c, env.Err()
 }
@@ -121,6 +125,13 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("config: %w", err)
 	}
 	q := tenantdb.New(db)
+	secrets, err := security.NewSecretStore(cfg.Secrets, q)
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	tenants := tenant.NewStore(db)
+	byo := &registry.BYO{Source: tenants, Secrets: secrets, Timeout: 10 * time.Second,
+		Egress: security.NewEgress(security.EgressConfig{Trusted: security.Hosts(cfg.EgressTrusted)})}
 	settings := controlplane.NewSettings(q, rdb, log)
 	if err := settings.Load(ctx); err != nil {
 		return err
@@ -134,12 +145,12 @@ func run(ctx context.Context) error {
 		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
 	}))
 	srv := &controlplane.Server{
-		DB: db, Q: q, Tenants: tenant.NewStore(db), Keys: keys, Verifier: auth.NewLocalVerifier(keys, cfg.JWTIssuer),
+		DB: db, Q: q, Tenants: tenants, Keys: keys, Verifier: auth.NewLocalVerifier(keys, cfg.JWTIssuer),
 		Settings: settings, Mailer: controlplane.SMTPMailer{Addr: cfg.SMTPAddr, From: cfg.MailFrom}, Redis: rdb,
 		Idem: controlplane.NewIdempotency(rdb), Presign: presign, UploadBucket: cfg.S3UploadBucket,
 		SearchURL: cfg.SearchURL, HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		AppBaseURL: cfg.AppBaseURL, SecureCookies: cfg.AppEnv != "dev",
-		PlatformEmbedder: registry.PlatformEmbedderInfo, Log: log,
+		PlatformEmbedder: registry.PlatformEmbedderInfo, BYO: byo, Log: log,
 	}
 
 	mux := http.NewServeMux()

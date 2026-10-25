@@ -31,9 +31,11 @@ type Platform struct {
 	Centroids  *centroids.Store
 }
 
-// Deps is what factories may use. EgressClient and SecretStore join in M5 for BYO providers.
+// Deps is what factories may use: the platform clients, and for BYO providers the egress
+// client, secret store and bulkheads.
 type Deps struct {
 	Platform Platform
+	BYO      *BYO
 	Log      *slog.Logger
 }
 
@@ -71,6 +73,9 @@ type cacheKey struct {
 type entry struct {
 	value   any
 	builtAt time.Time
+	// expires, when set, rebuilds the entry sooner than its role's refresh (a BYO provider
+	// that failed to build).
+	expires time.Time
 }
 
 // Registry builds providers through factories keyed by (kind, type) and caches them per
@@ -82,6 +87,7 @@ type Registry struct {
 	cache      *lru.Cache[cacheKey, *entry]
 	drainGrace time.Duration
 	refresh    time.Duration
+	byoRefresh time.Duration
 
 	mu      sync.Mutex
 	pending []retiring
@@ -101,6 +107,11 @@ type Options struct {
 	DrainGrace time.Duration
 	// Refresh rebuilds time-sensitive entries (the index version and its centroids).
 	Refresh time.Duration
+	// BYO enables BYO embedders and vector stores.
+	BYO *BYO
+	// BYORefresh rebuilds BYO providers so connection and secret changes are picked up
+	// (default 5 min).
+	BYORefresh time.Duration
 }
 
 // New returns a registry with the platform factories registered.
@@ -108,14 +119,21 @@ func New(p Platform, opts Options, log *slog.Logger) *Registry {
 	if opts.Size <= 0 {
 		opts.Size = 1024
 	}
-	r := &Registry{deps: Deps{Platform: p, Log: log}, factories: map[factoryKey]Factory{},
-		drainGrace: opts.DrainGrace, refresh: opts.Refresh, builds: map[cacheKey]*sync.Mutex{}}
+	if opts.BYORefresh <= 0 {
+		opts.BYORefresh = 5 * time.Minute
+	}
+	r := &Registry{deps: Deps{Platform: p, BYO: opts.BYO, Log: log}, factories: map[factoryKey]Factory{},
+		drainGrace: opts.DrainGrace, refresh: opts.Refresh, byoRefresh: opts.BYORefresh, builds: map[cacheKey]*sync.Mutex{}}
 	r.cache, _ = lru.NewWithEvict[cacheKey, *entry](opts.Size, func(_ cacheKey, e *entry) { r.retire(e.value) })
 	r.Register(KindEmbedder, tenant.ProviderPlatform, platformEmbedder)
 	r.Register(KindLexical, tenant.ProviderPlatform, platformLexical)
 	r.Register(KindVectorStore, tenant.ProviderPlatform, platformVectors)
 	r.Register(KindScorer, tenant.ScorerDefaultLinear, defaultLinear)
 	r.Register(KindCentroids, tenant.ProviderPlatform, platformCentroids)
+	if opts.BYO != nil {
+		r.Register(KindEmbedder, tenant.ProviderBYO, byoEmbedder)
+		r.Register(KindVectorStore, tenant.ProviderBYO, byoVectors)
+	}
 	return r
 }
 
@@ -185,7 +203,9 @@ func (r *Registry) closeDue(now time.Time) {
 
 func (r *Registry) get(ctx context.Context, res *tenant.Resolved, role, kind, typ string, block any, dims map[string]int, ttl time.Duration) (any, error) {
 	k := cacheKey{tenant: res.Tenant.ID, version: res.ConfigVersion, draft: res.Draft, role: role}
-	fresh := func(e *entry) bool { return ttl <= 0 || time.Since(e.builtAt) < ttl }
+	fresh := func(e *entry) bool {
+		return (ttl <= 0 || time.Since(e.builtAt) < ttl) && (e.expires.IsZero() || time.Now().Before(e.expires))
+	}
 	if e, ok := r.cache.Get(k); ok && fresh(e) {
 		return e.value, nil
 	}
@@ -203,7 +223,7 @@ func (r *Registry) get(ctx context.Context, res *tenant.Resolved, role, kind, ty
 	}
 	f, ok := r.factories[factoryKey{kind, typ}]
 	if !ok {
-		return nil, fmt.Errorf("%s: no %s provider of type %q (BYO providers arrive in M5–M7)", role, kind, typ)
+		return nil, fmt.Errorf("%s: no %s provider of type %q (BYO scorers arrive in M7)", role, kind, typ)
 	}
 	v, err := f(ctx, r.deps, Spec{Role: role, Resolved: res, Block: block, Dims: dims})
 	if err != nil {
@@ -216,8 +236,27 @@ func (r *Registry) get(ctx context.Context, res *tenant.Resolved, role, kind, ty
 	if old, ok := r.cache.Peek(k); ok && old.value != v {
 		r.retire(old.value)
 	}
-	r.cache.Add(k, &entry{value: v, builtAt: time.Now()})
+	e := &entry{value: v, builtAt: time.Now()}
+	if rt, ok := v.(retrying); ok {
+		e.expires = e.builtAt.Add(rt.retryAfter())
+	}
+	r.cache.Add(k, e)
 	return v, nil
+}
+
+func (r *Registry) ttlFor(provider string) time.Duration {
+	if provider == tenant.ProviderBYO {
+		return r.byoRefresh
+	}
+	return 0
+}
+
+// nameOf labels a provider: its own name when it has one, else fallback.
+func nameOf(v any, fallback string) string {
+	if n, ok := v.(named); ok && n.ProviderName() != "" {
+		return n.ProviderName()
+	}
+	return fallback
 }
 
 // centroidEntry is the index version and its centroids, refreshed together.
@@ -229,11 +268,11 @@ type centroidEntry struct {
 // For assembles the providers of res's tenant and config version from cached entries.
 func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Providers, error) {
 	cfg := res.Config
-	text, err := r.get(ctx, res, "text_embedder", KindEmbedder, cfg.Embedders.Text.Provider, cfg.Embedders.Text, nil, 0)
+	text, err := r.get(ctx, res, "text_embedder", KindEmbedder, cfg.Embedders.Text.Provider, cfg.Embedders.Text, nil, r.ttlFor(cfg.Embedders.Text.Provider))
 	if err != nil {
 		return nil, err
 	}
-	image, err := r.get(ctx, res, "image_embedder", KindEmbedder, cfg.Embedders.Image.Provider, cfg.Embedders.Image, nil, 0)
+	image, err := r.get(ctx, res, "image_embedder", KindEmbedder, cfg.Embedders.Image.Provider, cfg.Embedders.Image, nil, r.ttlFor(cfg.Embedders.Image.Provider))
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +282,7 @@ func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Pro
 	if err != nil {
 		return nil, err
 	}
-	vec, err := r.get(ctx, res, "vector", KindVectorStore, cfg.Stores.Vector.Provider, cfg.Stores.Vector, dims, 0)
+	vec, err := r.get(ctx, res, "vector", KindVectorStore, cfg.Stores.Vector.Provider, cfg.Stores.Vector, dims, r.ttlFor(cfg.Stores.Vector.Provider))
 	if err != nil {
 		return nil, err
 	}
@@ -259,9 +298,14 @@ func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Pro
 		TextEmbedder: te, ImageEmbedder: ie, Lexical: lex.(pipeline.LexicalIndex), Vectors: vec.(pipeline.VectorStore),
 		Prerank: pre.(pipeline.Scorer), Rank: rank.(pipeline.Scorer),
 		Names: map[string]string{
-			"text_embedder": cfg.Embedders.Text.Provider + ":" + cfg.Embedders.Text.Model, "image_embedder": cfg.Embedders.Image.Provider + ":" + cfg.Embedders.Image.Model,
-			"lexical": cfg.Stores.Lexical.Provider + ":opensearch", "vector": cfg.Stores.Vector.Provider + ":qdrant",
+			"text_embedder":  nameOf(te, cfg.Embedders.Text.Provider+":"+cfg.Embedders.Text.Model),
+			"image_embedder": nameOf(ie, cfg.Embedders.Image.Provider+":"+cfg.Embedders.Image.Model),
+			"lexical":        cfg.Stores.Lexical.Provider + ":opensearch", "vector": nameOf(vec, cfg.Stores.Vector.Provider+":qdrant"),
 			"prerank": cfg.Prerank.Scorer.Type, "rank": cfg.Rank.Scorer.Type,
+		},
+		BYO: map[string]bool{
+			"text_embedder": cfg.Embedders.Text.Provider == tenant.ProviderBYO, "image_embedder": cfg.Embedders.Image.Provider == tenant.ProviderBYO,
+			"vector": cfg.Stores.Vector.Provider == tenant.ProviderBYO,
 		},
 	}
 	ce, err := r.get(ctx, res, "centroids", KindCentroids, cfg.Stores.Lexical.Provider, lex, nil, r.refresh)

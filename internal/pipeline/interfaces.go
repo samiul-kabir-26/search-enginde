@@ -165,4 +165,7 @@ type Providers struct {
 	// Names label providers in traces and breaker keys, by role
 	// (text_embedder, image_embedder, lexical, vector, prerank, rank).
 	Names map[string]string
+	// BYO marks the roles served by a tenant's own endpoint; their failures fall back to the
+	// platform providers (lexical retrieval) within the stage budget.
+	BYO map[string]bool
 }

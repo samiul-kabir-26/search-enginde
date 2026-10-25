@@ -513,6 +513,7 @@ type TenantConnection struct {
 	LastTestedAt sql.NullTime          `json:"last_tested_at"`
 	LastError    sql.NullString        `json:"last_error"`
 	CreatedAt    time.Time             `json:"created_at"`
+	UpdatedAt    time.Time             `json:"updated_at"`
 }
 
 type TenantModel struct {
@@ -531,6 +532,9 @@ type TenantModel struct {
 	Status         string           `json:"status"`
 	ValidatedAt    sql.NullTime     `json:"validated_at"`
 	CreatedAt      time.Time        `json:"created_at"`
+	Settings       json.RawMessage  `json:"settings"`
+	LastError      sql.NullString   `json:"last_error"`
+	UpdatedAt      time.Time        `json:"updated_at"`
 }
 
 type TenantSecret struct {

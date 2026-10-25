@@ -7,6 +7,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 )
 
 func cond(field string, op filter.Op, v any, t catalog.FieldType) filter.Expr {
@@ -54,13 +55,13 @@ func TestPayloadRoundTrip(t *testing.T) {
 		ImageURLs: []string{"http://a", "http://b"}}
 	p.Normalize()
 	reg, _ := catalog.NewRegistry(nil)
-	payload := Payload(p, reg)
+	payload := vectorstore.Payload(p, reg)
 	payload["product_id"] = p.ProductID
 	vm, err := toValueMap(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, d := docFromPayload(vm)
+	id, d := docFromPayload(vm, vectorstore.Spec{})
 	if id != "abo:1" || d.Title != "Bag" || d.PriceMinor != 999 || d.RatingCount != 12 || d.ImageCount != 2 ||
 		d.ImageURL != "http://a" || *d.Rating != 4.2 || !d.CreatedAt.Equal(created) || d.CategoryIDs[0] != "bags" {
 		t.Errorf("round trip lost data: %s %+v", id, d)

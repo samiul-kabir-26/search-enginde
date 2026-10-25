@@ -37,6 +37,8 @@ type outcome struct {
 	hits   []pipeline.Hit
 	err    error
 	reason string
+	// from is the retriever whose failure this lexical fallback replaces.
+	from string
 }
 
 // Run fans out to the configured retrievers and replaces the candidates with the fused list.
@@ -51,18 +53,40 @@ func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, e
 		lexical  *pipeline.LexicalResult
 	)
 	g, gctx := errgroup.WithContext(ctx)
+	fallback := s.lexicalFallback(gctx, cfgs, st)
 	ran := 0
 	for _, rc := range cfgs {
 		run := s.retriever(rc, st, func(r pipeline.LexicalResult) { mu.Lock(); lexical = &r; mu.Unlock() })
+		var fb func(context.Context) ([]pipeline.Hit, error)
+		if fallback != nil && byoRetriever(rc.Name, st.Providers) {
+			fb = fallback
+			if run == nil && vectorMissing(rc.Name, q) {
+				// The BYO embedder produced no vector in S1: serve this retriever's share from the
+				// platform lexical index instead of dropping it.
+				ran++
+				g.Go(func() error {
+					hits, err := fb(gctx)
+					mu.Lock()
+					outcomes = append(outcomes, outcome{name: tenant.RetrieverLexicalBM25, weight: rc.Weight, hits: hits, err: err, reason: "no_vector", from: rc.Name})
+					mu.Unlock()
+					return nil
+				})
+				continue
+			}
+		}
 		if run == nil {
 			continue
 		}
 		ran++
 		g.Go(func() error {
 			key := resilience.Key{Tenant: string(res.Tenant.ID), Stage: s.Name(), Provider: rc.Name}
-			hits, out, err := resilience.Call(gctx, s.breakers, key, run, nil)
+			hits, out, err := resilience.Call(gctx, s.breakers, key, run, fb)
+			o := outcome{name: rc.Name, weight: rc.Weight, hits: hits, err: err, reason: out.Reason}
+			if out.Fallback && err == nil && fb != nil {
+				o.name, o.from = tenant.RetrieverLexicalBM25, rc.Name
+			}
 			mu.Lock()
-			outcomes = append(outcomes, outcome{name: rc.Name, weight: rc.Weight, hits: hits, err: err, reason: out.Reason})
+			outcomes = append(outcomes, o)
 			mu.Unlock()
 			return nil
 		})
@@ -84,14 +108,32 @@ func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, e
 	if lexical != nil {
 		st.Facets, st.TotalMatches = lexical.Facets, lexical.TotalMatches
 	}
-	sort.Slice(outcomes, func(i, j int) bool { return order(cfgs, outcomes[i].name) < order(cfgs, outcomes[j].name) })
+	key := func(o outcome) string {
+		if o.from != "" {
+			return o.from
+		}
+		return o.name
+	}
+	sort.Slice(outcomes, func(i, j int) bool { return order(cfgs, key(outcomes[i])) < order(cfgs, key(outcomes[j])) })
 	var results []pipeline.RetrieverResult
 	var failed []string
+	fused := map[string]bool{}
 	for _, o := range outcomes {
-		if o.err != nil {
+		switch {
+		case o.err != nil && o.from != "":
+			failed = append(failed, o.from+":"+o.reason+">"+o.name+":"+resilience.ReasonError)
+			continue
+		case o.err != nil:
 			failed = append(failed, o.name+":"+o.reason)
 			continue
+		case o.from != "":
+			failed = append(failed, o.from+":"+o.reason+">"+o.name)
 		}
+		// Several BYO retrievers may fall back to the same lexical hits; fuse them once.
+		if fused[o.name] {
+			continue
+		}
+		fused[o.name] = true
 		results = append(results, pipeline.RetrieverResult{Name: o.name, Weight: o.weight, Hits: o.hits})
 	}
 	if len(failed) > 0 {
@@ -103,6 +145,51 @@ func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, e
 	}
 	st.Candidates = pipeline.FuseRRF(results, res.Config.Retrieval.RRFK)
 	return rep, nil
+}
+
+// lexicalFallback returns the platform lexical search that replaces a failing BYO vector
+// retriever, run at most once per request, or nil when it cannot help: the query has no text,
+// or lexical_bm25 already runs (its hits carry the request without help).
+func (s *Stage) lexicalFallback(ctx context.Context, cfgs []tenant.RetrieverConfig, st *pipeline.State) func(context.Context) ([]pipeline.Hit, error) {
+	q, p, cfg := st.Query, st.Providers, st.Resolved.Config
+	byo := p.BYO["vector"] || p.BYO["text_embedder"] || p.BYO["image_embedder"]
+	if q.Text == "" || hasRetriever(cfgs, tenant.RetrieverLexicalBM25) || !byo {
+		return nil
+	}
+	k := 0
+	for _, rc := range cfgs {
+		k = max(k, rc.K)
+	}
+	once := sync.OnceValues(func() ([]pipeline.Hit, error) {
+		r, err := p.Lexical.Search(ctx, pipeline.LexicalSearch{
+			Text: q.Text, Boosts: cfg.Retrieval.FieldBoosts, Base: q.BaseFilter, Request: q.Filter, K: k,
+		})
+		return r.Hits, err
+	})
+	return func(context.Context) ([]pipeline.Hit, error) { return once() }
+}
+
+// byoRetriever reports whether a vector retriever depends on a BYO embedder or store.
+func byoRetriever(name string, p *pipeline.Providers) bool {
+	switch name {
+	case tenant.RetrieverVectorText:
+		return p.BYO["vector"] || p.BYO["text_embedder"]
+	case tenant.RetrieverVectorImage, tenant.RetrieverVectorTextToImage:
+		return p.BYO["vector"] || p.BYO["image_embedder"]
+	}
+	return false
+}
+
+// vectorMissing reports whether S1 left a text-derived vector empty although the query has
+// text (its embedder failed).
+func vectorMissing(name string, q *pipeline.Query) bool {
+	switch name {
+	case tenant.RetrieverVectorText:
+		return q.Text != "" && len(q.TextVector) == 0
+	case tenant.RetrieverVectorTextToImage:
+		return q.Text != "" && len(q.TextToImageVector) == 0
+	}
+	return false
 }
 
 // similarK is the per-retriever depth of similar-item queries when the config does not list

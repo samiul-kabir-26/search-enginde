@@ -100,7 +100,7 @@ The goal is a learnable ranking signal, not noise.
 **Pipeline.** `seed` publishes `catalog.product.v1` events. `indexer` then:
 1. maps each product to the canonical schema;
 2. embeds it via the tenant's configured embedders;
-3. upserts to Qdrant and OpenSearch.
+3. upserts to the vector store (the platform Qdrant collection, or the tenant's BYO store) and OpenSearch.
 
 **Catalog event envelope (`catalog.product.v1`).**
 - Key `{tenant_id}:{product_id}`, so one product's changes share a partition and stay ordered. Headers: `tenant-id`, `event-id`, `op`, `schema-version` (`1`); when present they must match the body.
@@ -133,6 +133,12 @@ The data-prep scripts do not compute embeddings, so indexing and query use the s
 - HNSW: `m=16`, `ef_construct=128`. Search `ef` comes from config (default 128). The optimizer's `indexing_threshold` is 1,000 KB, so HNSW is built even for small tenants (Qdrant's 10 MB default leaves a 10K-product collection on brute force, where filtered top-500 searches take ~100 ms instead of ~9 ms). Payloads use `memory: cached`.
 - Payload indexes: `vendor_id`, `category_ids`, `brand`, `status`, `stock` (integer), `price_minor` (integer), `ship_regions`, `moq`.
 - Point ID: UUIDv5 of `product_id`; `product_id` is also stored in the payload.
+
+**BYO vector stores (M5).** A tenant with a BYO vector store (Qdrant, pgvector or Milvus; `docs/TENANT_CONFIG.md` §4) creates the collection or table itself; the indexer embeds products with the configured embedders (platform or BYO) and writes them into it through the declared vector names and `payload_mapping`.
+- BYO stores have no versions: streaming writes and backfills go to the same collection in place (the lexical index is still versioned and swapped). After a backfill the indexer deletes the products the store holds that are no longer live, then checks that the store's count equals the live products before promoting the lexical version. Centroids are built from the BYO store's `text` vectors.
+- Only fields the store holds are written: any field in Qdrant, the table's columns in pgvector, the schema fields (plus the dynamic field when enabled) in Milvus. Point IDs in Qdrant are the UUIDv5 of `product_id`, as on the platform. A product without an image vector is written without one (Qdrant), with NULL (pgvector) or with a zero vector (Milvus fields that are not nullable).
+- A failing BYO provider affects only its tenant: the consumer retries that tenant's batch 3 times and then skips its events (logged; an index job restores them) instead of stalling every tenant.
+- Catalog image URLs are tenant data: they are fetched through the egress client (https, public addresses only), except the platform's own S3 image host.
 
 **OpenSearch index `t_{tenant}_products_v{n}`:**
 - `title`, `description` and `attributes.*` are text fields with the English analyzer plus a `.keyword` subfield where needed.

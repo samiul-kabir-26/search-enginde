@@ -38,7 +38,7 @@ type ValidationResult struct {
 	Errors []platform.FieldError `json:"errors"`
 }
 
-// validateDocument parses a document strictly and runs every rule that needs no live probe.
+// validateDocument parses a document strictly and runs every rule, probing BYO endpoints.
 func (s *Server) validateDocument(ctx context.Context, tid tenant.ID, doc []byte) (*tenant.Config, []platform.FieldError, error) {
 	cfg, err := tenant.ParseConfig(doc)
 	if err != nil {
@@ -52,7 +52,11 @@ func (s *Server) validateDocument(ctx context.Context, tid tenant.ID, doc []byte
 	if err != nil {
 		return nil, nil, err
 	}
-	errs := cfg.Validate(ctx, tenant.ValidationDeps{Plan: plan, PlatformEmbedder: s.PlatformEmbedder})
+	deps := tenant.ValidationDeps{Plan: plan, PlatformEmbedder: s.PlatformEmbedder}
+	if s.BYO != nil {
+		deps.BYO = byoChecker{s: s, tid: tid, plan: plan}
+	}
+	errs := cfg.Validate(ctx, deps)
 	if errs == nil {
 		errs = []platform.FieldError{}
 	}

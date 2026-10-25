@@ -32,6 +32,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/registry"
 	"github.com/zavisoft/search-engine/internal/resilience"
 	"github.com/zavisoft/search-engine/internal/searchapi"
+	"github.com/zavisoft/search-engine/internal/security"
 	"github.com/zavisoft/search-engine/internal/stages/filter"
 	"github.com/zavisoft/search-engine/internal/stages/prerank"
 	"github.com/zavisoft/search-engine/internal/stages/queryunderstanding"
@@ -39,6 +40,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/stages/rerank"
 	"github.com/zavisoft/search-engine/internal/stages/retrieval"
 	"github.com/zavisoft/search-engine/internal/tenant"
+	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 )
 
 const service = "search-api"
@@ -64,6 +66,10 @@ type config struct {
 	ClickHouse      searchapi.ClickHouseConfig
 	ShadowWorkers   int
 	OTLPEndpoint    string
+	Secrets         security.SecretBackend
+	EgressTrusted   string
+	BYOConcurrency  int
+	BYOTimeout      time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -92,6 +98,11 @@ func loadConfig() (config, error) {
 		},
 		ShadowWorkers: env.Int("SHADOW_WORKERS", 8),
 		OTLPEndpoint:  env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		Secrets:       security.SecretBackendFromEnv(env),
+		EgressTrusted: env.String("EGRESS_TRUSTED_HOSTS", ""),
+		// Per-tenant concurrent calls to BYO endpoints (docs/ARCHITECTURE.md §7 bulkheads).
+		BYOConcurrency: env.Int("BYO_MAX_CONCURRENCY", 32),
+		BYOTimeout:     env.Duration("BYO_TIMEOUT", 10*time.Second),
 	}
 	return c, env.Err()
 }
@@ -170,10 +181,19 @@ func run(ctx context.Context) error {
 		log.Warn("initial JWKS fetch failed; retrying on first request", "err", err)
 	}
 	resolver := tenant.NewResolver(store, cfg.ConfigTTL)
+	secrets, err := security.NewSecretStore(cfg.Secrets, tenantdb.New(db))
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	byo := &registry.BYO{
+		Source: store, Secrets: secrets, Timeout: cfg.BYOTimeout,
+		Egress:    security.NewEgress(security.EgressConfig{Trusted: security.Hosts(cfg.EgressTrusted)}),
+		Bulkheads: resilience.NewBulkheads(cfg.BYOConcurrency),
+	}
 	reg := registry.New(registry.Platform{
 		Triton: triton, OpenSearch: osClient, Qdrant: qClient,
 		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
-	}, registry.Options{Size: 1024, DrainGrace: 30 * time.Second, Refresh: 2 * time.Minute}, log)
+	}, registry.Options{Size: 1024, DrainGrace: 30 * time.Second, Refresh: 2 * time.Minute, BYO: byo}, log)
 	sink, err := searchapi.NewClickHouseSink(cfg.ClickHouse, log)
 	if err != nil {
 		return err

@@ -12,6 +12,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/catalog/centroids"
+	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
@@ -21,6 +22,9 @@ const (
 	targetTTL      = 30 * time.Second
 	retryBaseDelay = 500 * time.Millisecond
 	retryMaxDelay  = 30 * time.Second
+	// byoAttempts bounds retries of a tenant whose BYO provider fails, after which its events
+	// in the batch are skipped (a re-index job restores them) so other tenants keep flowing.
+	byoAttempts = 3
 )
 
 // Consumer is the streaming indexer: a consumer group on catalog.product.v1 that applies
@@ -111,16 +115,50 @@ func (c *Consumer) apply(ctx context.Context, records []*kgo.Record) (Result, er
 			res.Invalid += len(events)
 			continue
 		}
+		if errors.Is(err, ErrBYO) {
+			c.log.Error("BYO provider unavailable; tenant's events skipped (run an index job to restore them)",
+				"tenant", id, "events", len(events), "err", err)
+			res.Invalid += len(events)
+			continue
+		}
 		if err != nil {
 			return res, err
 		}
 		r, err := c.proc.ProcessAll(ctx, t, events)
+		if err != nil && t.BYO {
+			r, err = c.retryBYO(ctx, t, events, err)
+			if err != nil {
+				c.log.Error("BYO tenant's events skipped after retries (run an index job to restore them)",
+					"tenant", id, "events", len(events), "err", err)
+				res.Invalid += len(events)
+				continue
+			}
+		}
 		if err != nil {
 			return res, fmt.Errorf("tenant %s: %w", id, err)
 		}
 		res.Add(r)
 	}
 	return res, nil
+}
+
+// retryBYO retries a BYO tenant's batch a few times with backoff.
+func (c *Consumer) retryBYO(ctx context.Context, t *Target, events []catalog.ProductEvent, err error) (Result, error) {
+	delay := retryBaseDelay
+	for attempt := 1; attempt < byoAttempts; attempt++ {
+		c.log.Warn("BYO tenant batch failed; retrying", "tenant", t.Tenant, "attempt", attempt, "err", err)
+		select {
+		case <-ctx.Done():
+			return Result{}, fmt.Errorf("retry %s: %w", t.Tenant, ctx.Err())
+		case <-time.After(delay):
+		}
+		delay *= 2
+		var r Result
+		if r, err = c.proc.ProcessAll(ctx, t, events); err == nil {
+			return r, nil
+		}
+	}
+	return Result{}, err
 }
 
 // target returns the tenant's cached Target, rebuilding it when older than targetTTL so config
@@ -135,10 +173,15 @@ func (c *Consumer) target(ctx context.Context, id tenant.ID) (*Target, error) {
 	}
 	v, err := stores.EnsureActive(ctx)
 	if err != nil {
+		_ = t.Close()
 		return nil, fmt.Errorf("tenant %s: %w", id, err)
 	}
-	if old, ok := c.targets[id]; !ok || old.target.ConfigVersion != t.ConfigVersion {
+	old, ok := c.targets[id]
+	if !ok || old.target.ConfigVersion != t.ConfigVersion {
 		c.log.Info("indexing target ready", "tenant", id, "config_version", t.ConfigVersion, "index_version", v)
+	}
+	if ok {
+		_ = old.target.Close()
 	}
 	c.targets[id] = cachedTarget{target: t, builtAt: time.Now()}
 	return t, nil
@@ -176,6 +219,7 @@ func BackfillVersion(ctx context.Context, brokers []string, id tenant.ID, v int,
 	if err != nil {
 		return rep, err
 	}
+	defer func() { _ = t.Close() }()
 	previous, err := stores.Lexical.Active(ctx)
 	if err != nil {
 		return rep, err
@@ -187,7 +231,10 @@ func BackfillVersion(ctx context.Context, brokers []string, id tenant.ID, v int,
 		return rep, err
 	}
 	bt := *t
-	bt.Lexical, bt.Vectors = stores.Lexical.Version(rep.Version), stores.Vectors.Version(rep.Version)
+	bt.Lexical = stores.Lexical.Version(rep.Version)
+	if stores.Vectors != nil {
+		bt.Vectors = stores.Vectors.Version(rep.Version)
+	}
 	log.Info("backfill started", "tenant", id, "version", rep.Version, "config_version", t.ConfigVersion)
 
 	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ConsumeTopics(catalog.Topic),
@@ -229,16 +276,41 @@ func BackfillVersion(ctx context.Context, brokers []string, id tenant.ID, v int,
 	if rep.LexicalCount, err = stores.Lexical.Count(ctx, rep.Version); err != nil {
 		return rep, err
 	}
-	if rep.VectorCount, err = stores.Vectors.Count(ctx, rep.Version); err != nil {
+	var vectors interface {
+		centroids.VectorSource
+		Count(ctx context.Context, v int) (int64, error)
+	} = stores.Vectors
+	if stores.Vectors == nil {
+		vectors = stores.BYO
+	}
+	if rep.VectorCount, err = vectors.Count(ctx, rep.Version); err != nil {
 		return rep, err
 	}
+	if stores.BYO != nil && rep.VectorCount > int64(len(alive)) {
+		pruned, err := prune(ctx, stores.BYO, alive)
+		if err != nil {
+			return rep, fmt.Errorf("prune BYO vector store: %w", err)
+		}
+		log.Info("pruned products that are no longer live from the BYO vector store", "tenant", id, "pruned", pruned)
+		if rep.VectorCount, err = vectors.Count(ctx, rep.Version); err != nil {
+			return rep, err
+		}
+	}
 	rep.Duration = time.Since(start)
-	if rep.LexicalCount != int64(rep.Expected) || rep.VectorCount != int64(rep.Expected) {
-		return rep, fmt.Errorf("count mismatch in v%d: expected %d live products, lexical %d, vector %d; not promoted",
-			rep.Version, rep.Expected, rep.LexicalCount, rep.VectorCount)
+	if rep.LexicalCount != int64(rep.Expected) {
+		return rep, fmt.Errorf("count mismatch in v%d: expected %d live products, lexical %d; not promoted",
+			rep.Version, rep.Expected, rep.LexicalCount)
+	}
+	switch {
+	case stores.Vectors != nil && rep.VectorCount != int64(rep.Expected):
+		return rep, fmt.Errorf("count mismatch in v%d: expected %d live products, vector %d; not promoted",
+			rep.Version, rep.Expected, rep.VectorCount)
+	case stores.Vectors == nil && rep.VectorCount != int64(rep.Expected):
+		return rep, fmt.Errorf("count mismatch: expected %d live products, BYO vector store %d; not promoted",
+			rep.Expected, rep.VectorCount)
 	}
 	if builder.Centroids != nil {
-		idx, err := centroids.BuildFrom(ctx, stores.Vectors, rep.Version)
+		idx, err := centroids.BuildFrom(ctx, vectors, rep.Version)
 		if err != nil {
 			return rep, fmt.Errorf("build centroids: %w", err)
 		}
@@ -258,6 +330,30 @@ func BackfillVersion(ctx context.Context, brokers []string, id tenant.ID, v int,
 		}
 	}
 	return rep, nil
+}
+
+// prune deletes the products a BYO store holds that are not live: a BYO store is written in
+// place, so a backfill must remove what an earlier catalog had.
+func prune(ctx context.Context, st interface {
+	centroids.VectorSource
+	Delete(ctx context.Context, ids []string) error
+}, alive map[string]bool) (int, error) {
+	var gone []string
+	err := st.ScrollVectors(ctx, 0, pipeline.VectorText, func(id string, _ []float32, _ []string) error {
+		if !alive[id] {
+			gone = append(gone, id)
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	for start := 0; start < len(gone); start += 500 {
+		if err := st.Delete(ctx, gone[start:min(start+500, len(gone))]); err != nil {
+			return 0, err
+		}
+	}
+	return len(gone), nil
 }
 
 // catchUp reads the topic until every partition reaches the end offset observed on entry,

@@ -148,20 +148,24 @@ Platform admins can also call every `/v1/tenants/{tid}/...` endpoint.
 
 ### Connections and secrets
 
+All need a plan with BYO providers (403 `plan_forbids_byo` otherwise). Reads need `tenant:read`, the rest `tenant:write`.
+
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/tenants/{tid}/secrets` | Body `{kind, value}` → `{secret_ref}`; the value is never readable again |
-| CRUD | `/v1/tenants/{tid}/connections` | Vector store and lexical connections |
-| POST | `/v1/tenants/{tid}/connections/{id}/test` | Health check, collection exists, dims and metric match, sample query latency |
+| POST | `/v1/tenants/{tid}/secrets` | Body `{kind, value}` (`kind` like `api_key` or `password`, value ≤ 4 KB) → 201 `{secret_ref}`; the value is never readable again or logged |
+| GET/POST | `/v1/tenants/{tid}/connections` | Vector store connections: `{kind: "vector_store", type: qdrant\|pgvector\|milvus, endpoint, secret_ref?, settings?: {username, database}}`. The endpoint must pass the egress policy (`egress_denied`): https for Qdrant (gRPC port, default 6334) and Milvus (default 19530), `postgres://user@host/db?sslmode=require\|verify-ca\|verify-full` for pgvector (`tls_required`); no credentials in the URL. The secret is the Qdrant API key, the PostgreSQL password, or the Milvus password (with `settings.username`) or token. New connections are `untested`. `kind: "lexical"` is `byo_unavailable` in v1 |
+| GET/PUT/DELETE | `/v1/tenants/{tid}/connections/{id}` | PUT on a connection serving the active or shadow version runs the test with the new settings first and saves only if it passes (422 `connection_test_failed`, nothing changed); other connections are saved as `untested`. DELETE is 409 `in_use` while the draft or a non-retired version references it |
+| POST | `/v1/tenants/{tid}/connections/{id}/test` | Optional body `{collection, vectors, payload_mapping}`; without it, the draft's `stores.vector` block (which must use this connection). Checks `configure`, `health`, `collection`, `vectors` (dimension and metric as declared and supported), `fields` (product ID and always-on filter fields stored; unstored filterable fields are listed), `sample_query` (latency). Returns `{ok, checks: [{name, ok, message, latency_ms}]}` and sets the status to `validated` or `failed` (`last_error`) |
 
 ### Models
 
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/v1/tenants/{tid}/models` | Register a remote model (`kserve_v2` or `openai_embeddings`) with declared schemas |
-| POST | `/v1/tenants/{tid}/models/uploads` | Returns a presigned S3 PUT for an ONNX artifact; then `POST /models` with `artifact_uri` |
-| POST | `/v1/tenants/{tid}/models/{id}/validate` | Dry-run inference with probe inputs; checks shapes, dtypes, latency |
-| GET | `/v1/platform/models` | Catalog of platform pre-trained models tenants can select |
+| GET/POST | `/v1/tenants/{tid}/models` | Register a remote embedder: `{kind: "embedder", type: kserve_v2\|openai_embeddings, name, version, endpoint, secret_ref?, input_schema: {modality: text\|image}, output_schema: {dim}, supports_text_to_image?, max_batch_size?}`. For `kserve_v2`, `name`/`version` are the KServe model name and version; for `openai_embeddings`, `name` is the `model` field (text only). The secret is sent as a bearer token. New models are `registered`. Prerank, rank and rerank models and ONNX uploads arrive in M7 (`not_available`) |
+| GET | `/v1/tenants/{tid}/models/{id}` | Includes `status`, `transport` and `last_error` |
+| POST | `/v1/tenants/{tid}/models/uploads` | M7: presigned S3 PUT for an ONNX artifact; then `POST /models` with `artifact_uri` |
+| POST | `/v1/tenants/{tid}/models/{id}/validate` | Probe inferences for the model's modality (two texts; a small JPEG; the text tower when `supports_text_to_image`): output `[N, dim]` and L2-normalized. A `kserve_v2` model is tried over gRPC and then REST; the transport that works is recorded. Sets the status to `validated` or `failed` |
+| GET | `/v1/platform/models` | Public catalog of the platform models tenants can select (`id`, `kind`, `modality`, `dim`, `supports_text_to_image`) |
 
 ### Indexing
 

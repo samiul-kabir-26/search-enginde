@@ -100,3 +100,36 @@ func TestCanceledCallerDoesNotTrip(t *testing.T) {
 		t.Error("client cancellations must not open the breaker")
 	}
 }
+
+func TestBulkheadRefusesWhenFull(t *testing.T) {
+	b := NewBulkheads(2)
+	r1, err1 := b.Acquire("a")
+	r2, err2 := b.Acquire("a")
+	if err1 != nil || err2 != nil {
+		t.Fatal(err1, err2)
+	}
+	if _, err := b.Acquire("a"); !errors.Is(err, ErrBulkheadFull) {
+		t.Fatalf("third call: %v", err)
+	}
+	if r, err := b.Acquire("b"); err != nil {
+		t.Fatalf("other tenants are unaffected: %v", err)
+	} else {
+		r()
+	}
+	r1()
+	if b.InFlight("a") != 1 {
+		t.Errorf("in flight = %d", b.InFlight("a"))
+	}
+	r3, err := b.Acquire("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2()
+	r3()
+
+	br := newBreakers(t)
+	_, out, err := Call(context.Background(), br, Key{"t", "s", "p"}, func(context.Context) (int, error) { return 0, ErrBulkheadFull }, nil)
+	if err == nil || out.Reason != ReasonBulkhead {
+		t.Errorf("reason = %q, err = %v", out.Reason, err)
+	}
+}

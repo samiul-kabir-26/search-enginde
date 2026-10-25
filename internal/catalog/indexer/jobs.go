@@ -141,6 +141,7 @@ func (j *JobRunner) publishUpload(ctx context.Context, id tenant.ID, version int
 	if err != nil {
 		return 0, 0, err
 	}
+	defer func() { _ = t.Close() }()
 	obj, err := j.S3.GetObject(ctx, &s3.GetObjectInput{Bucket: &j.UploadBucket, Key: &key})
 	if err != nil {
 		return 0, 0, fmt.Errorf("read upload %s: %w", key, err)

@@ -9,7 +9,20 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M4 is done** (M0–M3 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M5 is done** (M0–M4 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M5 verification (2026-10-25, same laptop):
+
+| Check | Result |
+|---|---|
+| Acceptance: chaos test | `internal/e2e` TestBYOChaos: a tenant with a BYO OpenAI-compatible embedder and a real BYO Qdrant behind a TCP fault proxy, default budgets (S1 40, S2 120, total 300 ms). Request p95: embedder fails **1.8 ms**, hangs **42.9 ms**, slow (250 ms) **44.5 ms**; store refuses **0.9 ms**, hangs **122.7 ms**, slow **123.3 ms**. Every request returned results (platform lexical), none degraded, each stage inside its budget; breakers opened after 10 failures and later fallbacks are immediate. Under `-race`: ≤ 128.9 ms |
+| Isolation | Tenant B's p95 while tenant A sends steady traffic (8 clients, 100 RPS each): **0.24 ms with A healthy, 0.24 ms with A's embedder and store hung** (3.8 vs 3.7 ms under `-race`); A's bulkhead peaked at its limit of 8 calls in flight |
+| Live (dev stack) | A new growth tenant configured only through control-api: secret, BYO `kserve_v2` model (Triton `bge_text`; gRPC fails on its HTTP port, so REST was detected and recorded), BYO pgvector connection (test: health, collection, vectors, fields, sample query); the draft validated live; 200 uploaded products → index job **succeeded in 16 s**, 200/200 rows with text and image vectors in the tenant's own table; activated. Search p50 **24 ms** (S1 `byo:kserve_v2:bge_text` 15 ms). With the pgvector container **paused**: 30/30 searches returned results, p50 23 ms, max 150 ms (S2 timeouts, then `breaker_open`); unpaused, vector retrieval came back without fallback. The demo tenant (platform providers) was unaffected; no secret values in any log |
+| BYO adapters | One conformance suite (writes, filtered kNN with pushdown including arrays, `ne` and custom fields, get, count, scroll, describe, delete) passes on real Qdrant 1.20, pgvector 0.8.7 (PostgreSQL 17) and Milvus 2.6.25 |
+| Security | Egress tests: private, loopback, link-local, metadata, CGNAT and IPv6 ranges; a host name resolving to loopback is refused at dial time; no redirects, no plain http, allowlist; the metadata address is rejected at registration (integration). Envelope encryption: a ciphertext moved to another tenant does not decrypt. Vault KV v2 against Vault 2.1.2 |
+| Control plane | Integration tests: secrets (stored encrypted, never returned), models (validation, dimension mismatch, gRPC→REST detection), connections (egress, TLS, test checks, status), BYO draft validated live and published, live-connection update tested before saving, in-use delete refused, starter plan refused, tenant isolation |
+| Tests | Unit (`-race`) and integration (`-p 1 -race`) pass. `make cover` **86.8%** (pipeline 88.0, stages 94.4, tenant 83.7, security 80.8). `make lint` clean; `control.yaml` passes Redocly; TS client regenerated and the web app typechecks |
+| Environment note | The Milvus test container needs about 1.5 GB of memory. Linting with `--build-tags integration` (not part of `make lint` or CI) still reports 3 `contextcheck` findings in M4's control-plane test harness |
 
 M4 verification (2026-10-25, same laptop, against the running stack):
 
@@ -111,6 +124,20 @@ M0 verification:
 | D36 | Index jobs are queued in `index_jobs` by control-api and run by the indexer (`FOR UPDATE SKIP LOCKED`); uploads are JSONL in the tenant's own shape, published as catalog events and then backfilled into `v{n+1}` | One indexing path for streamed and uploaded data, and the indexer already owns embedding and alias swaps |
 | D37 | Onboarding accepts only what exists today: BYO embedders and stores return `byo_unavailable` until M5, learned and BYO ranking `not_available` until M7, CEL rules are saved with a `deferred` warning until M7; retrieval presets are balanced, keyword, semantic and visual | Steps validate against real capabilities instead of accepting config that cannot run |
 | D38 | A degraded result with no items is not snapshotted, and an activation prebuilds the new version's providers | Found in the live smoke test: the first queries after a search-api restart timed out while connections opened, and the empty degraded result was then served from the snapshot for 30 s. A startup warm-up is carried forward |
+| D39 | The Milvus adapter speaks Milvus's gRPC API (`milvus-proto/go-api/v2` v2.6.17) instead of the Go client v2 | The client v2 imports Milvus's server `pkg` (72 modules, including an embedded etcd 3.5) that does not compile against otelgrpc v0.70, which our OTel exporters require through grpc-gateway. The proto module needs only grpc and protobuf and is the same API the client wraps; the test container uses Milvus's standalone_embed recipe |
+| D40 | BYO vector stores are written by the indexer, in place: no `v{n}` versions or alias swap; a backfill re-upserts every live product, deletes the ones no longer live, and requires an exact count before promoting the lexical version | Owner's choice (2026-10-25): one indexing path for every store. The tenant creates the collection or table; the connection test checks it |
+| D41 | A failing BYO embedder or store degrades to the platform: its vector retrievers drop out and the lexical index carries the request; when `lexical_bm25` is not in the mix, a BYO vector retriever falls back to one platform BM25 search per request, fused under `lexical_bm25` | Owner's choice (2026-10-25) over dual-indexing every BYO tenant on platform vectors |
+| D42 | BYO lexical stores are not supported in v1 (`byo_unavailable`) | `PROJECT.md` lists only vector adapters for v1 |
+| D43 | BYO factories do no network I/O; a provider that cannot be built (missing, unvalidated, bad secret) fails each call and is rebuilt after 30 s; BYO providers are rebuilt every 5 min | A hung endpoint must never block outside a stage budget, and a BYO problem must never 503 the request; the refresh picks up connection edits and secret rotations |
+| D44 | Bulkhead: 32 concurrent BYO calls per tenant per search-api (`BYO_MAX_CONCURRENCY`); a full bulkhead refuses at once (`bulkhead_full`) | Queueing would spend the stage budget waiting; refusing lets the fallback run |
+| D45 | The plan allowlist applies to tenant-registered endpoints; catalog image URLs get the SSRF guard and https but not the allowlist; the platform's own hosts are trusted via `EGRESS_TRUSTED_HOSTS` (and the indexer's S3 hosts) | Image URLs are catalog data on tenants' CDNs; starter plans cannot register endpoints at all (`byo_allowed` false) |
+| D46 | KServe REST is chosen at model validation (gRPC first, REST when gRPC fails), not per call; images over REST use the binary tensor data extension, text JSON strings | Per-call fallback would double latency on a hung endpoint; binary images are not valid JSON strings |
+| D47 | Embedder schemas are `input_schema {modality: text\|image}` and `output_schema {dim}`; `tenant_models` gains `settings` (transport, max batch, text-to-image), `last_error`, `updated_at` (migration 000004); connection `settings` are `{username, database}` | The spec named the columns but not their contents for embedders |
+| D48 | Updating a connection that serves the active or shadow version runs the connection test with the new settings and saves only if it passes; deleting a connection referenced by the draft or a non-retired version is 409 | A credential rotation or typo must not break live search |
+| D49 | The indexer retries a BYO tenant's failing batch 3 times, then skips that tenant's events in the batch (logged; an index job restores them) | Before M5 a failing batch blocked every tenant; a tenant's own endpoint must not stall platform indexing |
+| D50 | Rules 3–5 probe live on draft save, validate and publish (5 s per probe); successful probes are cached 30 s, failures never | Wizard edits would otherwise call tenant endpoints on every save |
+| D51 | Milvus searches use Bounded consistency; gets and counts use Strong | Search latency; writes become searchable within Milvus's graceful time (~5 s) |
+| D52 | Vault is used through its HTTP KV v2 API (no SDK); secret refs are ULIDs and the Vault path includes the tenant | Two calls are needed; refs are validated before use in a path |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
 ### Resolved questions (answered 2026-10-25)
@@ -336,18 +363,24 @@ New deps: `golang.org/x/crypto/argon2`, `clickhouse-go/v2` (moved into search-ap
 
 ---
 
-## M5 — BYO providers, egress security, secrets, resilience
+## M5 — BYO providers, egress security, secrets, resilience ✅
 
-**Done when:** in a chaos test, a BYO endpoint that fails or hangs falls back to the default within the stage budget.
+**Done when:** in a chaos test, a BYO endpoint that fails or hangs falls back to the default within the stage budget. **Met: `internal/e2e` TestBYOChaos, every failure mode inside its stage budget (see §0).**
 
-- [ ] `internal/security`: EgressClient (https only, resolve on every dial, `net.Dialer.Control` rejects RFC 1918, loopback, link-local, metadata, ::1 and fc00::/7), per-plan allowlist
-- [ ] Indexer image fetches (`indexer.HTTPFetcher`) go through EgressClient, with the platform's own S3 image host explicitly allowed
-- [ ] SecretStore interface: AES-256-GCM envelope encryption in MySQL (dev) and a Vault implementation; `POST /secrets`; never logged or returned
-- [ ] Vector adapters: Qdrant (BYO), pgvector (`pgx/v5`, SQL WHERE pushdown), Milvus (Go client v2); `payload_mapping`
-- [ ] Embedders: KServe v2 (gRPC plus REST fallback), `openai_embeddings` (client-side L2 normalization)
-- [ ] Connections CRUD and tester (health, collection exists, dims/metric, sample latency); model register and validate (probe inference)
-- [ ] Validation rules 3–6 with live probes; per-tenant bulkhead semaphores
-- [ ] Chaos tests: failing, hanging and slow BYO endpoints; tenant isolation (no p95 impact on other tenants)
+- [x] `internal/security`: `Egress` (https only, resolve on every dial, `net.Dialer.Control` rejects RFC 1918, loopback, link-local, metadata, CGNAT, ::1, fc00::/7, NAT64/6to4 and reserved ranges after resolution; no proxy, no redirects; gRPC passthrough targets and pgx identity lookup so the dialer sees host names), per-plan host allowlist, trusted platform hosts (**D45**)
+- [x] Indexer image fetches (`indexer.HTTPFetcher`) go through the egress client, with the platform's own S3 hosts trusted
+- [x] SecretStore: AES-256-GCM envelope encryption in MySQL (per-secret data key wrapped by `SECRETS_MASTER_KEY`, bound to tenant and ID) and a Vault KV v2 implementation (**D52**); `POST /secrets`; values travel as `security.Secret`, redacted in logs, `%v` and JSON
+- [x] Vector adapters: Qdrant (BYO collection), pgvector (`pgx/v5`, SQL WHERE pushdown, column introspection), Milvus (gRPC API, **D39**); `payload_mapping`; one conformance suite (`storetest`) passes on all three against real stores
+- [x] Embedders: KServe v2 (gRPC, REST fallback with the binary tensor extension, **D46**), `openai_embeddings` (client-side L2 normalization)
+- [x] Connections CRUD and tester (configure, health, collection, vectors dims/metric, fields, sample query latency); live-connection updates tested before saving, in-use deletes refused (**D48**); model register and validate (probe inference, transport detection); `GET /v1/platform/models`
+- [x] Validation rules 3–6 with live probes (**D50**); BYO lexical rejected (**D42**); per-tenant bulkhead semaphores (**D44**); BYO failures degrade to the platform lexical index (**D41**)
+- [x] Indexer: BYO embedders and stores, written in place with prune and exact count (**D40**); a BYO tenant's failures cannot stall other tenants (**D49**)
+- [x] Chaos tests: failing, hanging and slow BYO embedder and store; tenant isolation (no p95 impact on other tenants); TCP fault proxy `internal/testinfra/faultproxy`
+- [x] `control.yaml` schemas for every M5 endpoint, Redocly clean, TS client regenerated; migration 000004; docs (ARCHITECTURE §4/§5/§7/§9, TENANT_CONFIG §4/§5, API, MODELS §1, DATA §6, ONBOARDING §4.1)
+
+Carried forward: BYO scorers and ONNX uploads (M7); the BYO re-ranker (M8); the optional per-tenant egress allowlist for enterprise plans (R3); a startup warm-up for search-api (from M4).
+
+New deps: `jackc/pgx/v5`, `milvus-io/milvus-proto/go-api/v2`, testcontainers postgres and vault modules. Test images: `pgvector/pgvector:0.8.7-pg17-trixie`, `milvusdb/milvus:v2.6.25`, `hashicorp/vault:2.1.2`.
 
 ---
 

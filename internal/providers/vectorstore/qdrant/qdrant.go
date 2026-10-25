@@ -7,12 +7,12 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/qdrant/go-client/qdrant"
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
@@ -45,14 +45,18 @@ func NewClient(addr string) (*qdrant.Client, error) {
 	return c, nil
 }
 
-// Store is a tenant's platform-default vector collection. Writes target the alias
-// `t_{tenant}_products` unless bound to a physical version with Version.
+// Store is a tenant's platform-default vector collection, or a BYO collection. Platform
+// writes target the alias `t_{tenant}_products` unless bound to a physical version with
+// Version; a BYO store reads and writes the tenant's own collection in place, through its
+// declared vector names and payload mapping.
 type Store struct {
 	client   *qdrant.Client
 	alias    string
 	target   string
 	dims     VectorDims
 	registry *catalog.Registry
+	spec     vectorstore.Spec
+	byo      bool
 }
 
 var (
@@ -67,8 +71,44 @@ func New(client *qdrant.Client, t tenant.ID, dims VectorDims, registry *catalog.
 	return &Store{client: client, alias: alias, target: alias, dims: dims, registry: registry}
 }
 
-// CollectionName is the physical collection for version v.
-func (s *Store) CollectionName(v int) string { return s.alias + "_v" + strconv.Itoa(v) }
+// NewBYO returns a store over a tenant's own collection.
+func NewBYO(client *qdrant.Client, spec vectorstore.Spec) *Store {
+	return &Store{client: client, alias: spec.Collection, target: spec.Collection, spec: spec, byo: true}
+}
+
+// CollectionName is the physical collection for version v (a BYO store has only one).
+func (s *Store) CollectionName(v int) string {
+	if s.byo {
+		return s.target
+	}
+	return s.alias + "_v" + strconv.Itoa(v)
+}
+
+// vector returns the stored name of a pipeline vector.
+func (s *Store) vector(name string) string {
+	if v, ok := s.spec.Vector(name); ok {
+		return v.Name
+	}
+	return name
+}
+
+// Close closes a BYO store's client; the platform client is shared and owned by the caller.
+func (s *Store) Close() error {
+	if s.byo {
+		if err := s.client.Close(); err != nil {
+			return fmt.Errorf("close qdrant client: %w", err)
+		}
+	}
+	return nil
+}
+
+// ProviderName labels the store in traces and breaker keys.
+func (s *Store) ProviderName() string {
+	if s.byo {
+		return "byo:qdrant"
+	}
+	return "platform:qdrant"
+}
 
 // Version returns a copy of the store that writes to physical version v.
 func (s *Store) Version(v int) *Store {
@@ -86,13 +126,13 @@ func (s *Store) Upsert(ctx context.Context, points []pipeline.VectorPoint) error
 	for i, p := range points {
 		vecs := make(map[string]*qdrant.Vector, len(p.Vectors))
 		for name, v := range p.Vectors {
-			vecs[name] = qdrant.NewVector(v...)
+			vecs[s.vector(name)] = qdrant.NewVector(v...)
 		}
 		payload := make(map[string]any, len(p.Payload)+1)
 		for k, v := range p.Payload {
-			payload[k] = v
+			payload[s.spec.Field(k)] = v
 		}
-		payload["product_id"] = p.ProductID
+		payload[s.spec.Field(vectorstore.ProductIDField)] = p.ProductID
 		value, err := toValueMap(payload)
 		if err != nil {
 			return fmt.Errorf("payload %s: %w", p.ProductID, err)
@@ -237,7 +277,7 @@ func (s *Store) Promote(ctx context.Context, v int) error {
 	return nil
 }
 
-// Count returns the exact number of points in version v.
+// Count returns the exact number of points in version v (a BYO store counts its collection).
 func (s *Store) Count(ctx context.Context, v int) (int64, error) {
 	exact := true
 	n, err := s.client.Count(ctx, &qdrant.CountPoints{CollectionName: s.CollectionName(v), Exact: &exact})
@@ -263,62 +303,6 @@ func (s *Store) Drop(ctx context.Context, v int) error {
 		return fmt.Errorf("drop %s: %w", s.CollectionName(v), err)
 	}
 	return nil
-}
-
-// Payload is the stored payload of p: every filterable field (canonical and custom) plus the
-// display fields search results need without a second lookup.
-func Payload(p catalog.Product, r *catalog.Registry) map[string]any {
-	out := map[string]any{
-		"vendor_id":            p.VendorID,
-		"title":                p.Title,
-		"category_path":        p.CategoryPath,
-		"category_ids":         p.CategoryIDs,
-		"price_minor":          p.PriceMinor,
-		"currency":             p.Currency,
-		"moq":                  p.MOQ,
-		"status":               p.Status,
-		"rating_count":         p.RatingCount,
-		"listing_completeness": p.ListingCompleteness,
-		"image_count":          len(p.ImageURLs),
-	}
-	setIf := func(k string, ok bool, v any) {
-		if ok {
-			out[k] = v
-		}
-	}
-	setIf("brand", p.Brand != "", p.Brand)
-	setIf("product_type", p.ProductType != "", p.ProductType)
-	setIf("ship_regions", len(p.ShipRegions) > 0, p.ShipRegions)
-	setIf("image_url", len(p.ImageURLs) > 0, firstOr(p.ImageURLs))
-	if p.Stock != nil {
-		out["stock"] = *p.Stock
-	}
-	if p.Rating != nil {
-		out["rating"] = *p.Rating
-	}
-	if p.CreatedAt != nil {
-		out["created_at"] = p.CreatedAt.UTC().Format(time.RFC3339)
-	}
-	for _, f := range r.Filterable() {
-		if !f.Custom {
-			continue
-		}
-		key := strings.TrimPrefix(f.Name, catalog.CustomPrefix)
-		if v, ok := p.Custom[key]; ok {
-			if t, isTime := v.(time.Time); isTime {
-				v = t.UTC().Format(time.RFC3339)
-			}
-			out[f.Name] = v
-		}
-	}
-	return out
-}
-
-func firstOr(xs []string) string {
-	if len(xs) == 0 {
-		return ""
-	}
-	return xs[0]
 }
 
 // toValueMap converts typed slices, which the qdrant value conversion does not accept, to []any.

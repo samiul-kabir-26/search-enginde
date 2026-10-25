@@ -11,6 +11,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 	"github.com/zavisoft/search-engine/internal/tenant"
 	"github.com/zavisoft/search-engine/internal/testinfra"
 )
@@ -44,7 +45,7 @@ func TestStoreVersionsUpsertDelete(t *testing.T) {
 	p := catalog.Product{ProductID: "abo:1", TenantID: "T", Title: "bag", CategoryPath: []string{"Bags"}, PriceMinor: 10, Currency: "USD",
 		Stock: &stock, CreatedAt: &created, ImageURLs: []string{"http://img/1.jpg"}, Custom: map[string]any{"eco": true}}
 	p.Normalize()
-	payload := Payload(p, reg)
+	payload := vectorstore.Payload(p, reg)
 	if payload["custom.eco"] != true || payload["created_at"] != "2025-01-02T03:04:05Z" || payload["image_url"] != "http://img/1.jpg" {
 		t.Fatalf("payload = %v", payload)
 	}

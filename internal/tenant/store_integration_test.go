@@ -12,6 +12,7 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 
 	"github.com/zavisoft/search-engine/internal/tenant"
+	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 	"github.com/zavisoft/search-engine/internal/testinfra"
 )
 
@@ -76,5 +77,69 @@ func TestStoreAndResolverAgainstMySQL(t *testing.T) {
 	}
 	if _, err := r.Get(ctx, tenant.NewID()); !errors.Is(err, tenant.ErrNotFound) {
 		t.Errorf("unknown tenant: %v", err)
+	}
+}
+
+func TestBYORegistrationsAndConfigsAgainstMySQL(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("mysql", testinfra.MySQL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	s := tenant.NewStore(db)
+	q := tenantdb.New(db)
+	a, err := s.Create(ctx, tenant.NewTenant{Slug: "a", Name: "A", Plan: "growth", Region: "eu", Document: tenant.DefaultDocument()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := s.Create(ctx, tenant.NewTenant{Slug: "b", Name: "B", Plan: "growth", Region: "eu", Document: tenant.DefaultDocument()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.CreateTenantModel(ctx, tenantdb.CreateTenantModelParams{
+		ID: "m1", TenantID: string(a), Kind: tenantdb.TenantModelsKindEmbedder, Type: tenantdb.TenantModelsTypeKserveV2,
+		Name: "clip", Version: "1", Endpoint: sql.NullString{String: "https://kserve.example.com", Valid: true},
+		InputSchema: []byte(`{"modality":"image"}`), OutputSchema: []byte(`{"dim":512}`),
+		Settings: []byte(`{"transport":"rest","supports_text_to_image":true}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m, err := s.Model(ctx, a, "m1")
+	if err != nil || m.Status != tenant.StatusRegistered || m.Settings.Transport != "rest" || m.Endpoint != "https://kserve.example.com" {
+		t.Fatalf("Model = %+v, %v", m, err)
+	}
+	if info := m.EmbedderInfo(); info.Dim != 512 || !info.Image || !info.TextToImage || info.TextEmbedder {
+		t.Errorf("EmbedderInfo = %+v", info)
+	}
+	if _, err := s.Model(ctx, b, "m1"); !errors.Is(err, tenant.ErrNotFound) {
+		t.Errorf("another tenant's model: %v", err)
+	}
+	if err := q.CreateTenantConnection(ctx, tenantdb.CreateTenantConnectionParams{
+		ID: "c1", TenantID: string(a), Kind: tenantdb.TenantConnectionsKindVectorStore, Type: tenant.StoreMilvus,
+		Endpoint: "https://milvus.example.com", Settings: []byte(`{"username":"u","database":"d"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := s.Connection(ctx, a, "c1")
+	if err != nil || c.Status != tenant.StatusUntested || c.Settings.Username != "u" || c.Settings.Database != "d" {
+		t.Fatalf("Connection = %+v, %v", c, err)
+	}
+	if _, err := s.Connection(ctx, b, "c1"); !errors.Is(err, tenant.ErrNotFound) {
+		t.Errorf("another tenant's connection: %v", err)
+	}
+
+	if d, err := s.Draft(ctx, a); err != nil || d.Embedders.Text.Model != "bge-small-en-v1.5" {
+		t.Errorf("Draft = %+v, %v", d, err)
+	}
+	if c, err := s.ConfigVersion(ctx, a, 1); err != nil || c.Rank.Keep == 0 {
+		t.Errorf("ConfigVersion = %+v, %v", c, err)
+	}
+	if _, err := s.ConfigVersion(ctx, a, 9); !errors.Is(err, tenant.ErrNotFound) {
+		t.Errorf("unknown version: %v", err)
+	}
+	live, err := s.LiveVersions(ctx)
+	if err != nil || len(live) < 2 {
+		t.Errorf("LiveVersions = %+v, %v", live, err)
 	}
 }

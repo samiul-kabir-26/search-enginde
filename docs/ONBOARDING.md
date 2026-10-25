@@ -89,7 +89,7 @@ Each step is `PUT /v1/tenants/{tid}/onboarding/steps/{step}` with a strict JSON 
 |---|---|---|
 | `engine_tour`, `playground` | `{}` | Recorded only |
 | `catalog` | `{ingestion: "events"\|"upload", field_mapping, custom_fields?, samples}` | The mandatory catalog fields plus `vendor_id` and `image_urls` must be mapped; 1–20 samples must map without errors (same engine as `catalog/mapping/preview`) |
-| `retrieval` | `{preset?: "balanced"\|"keyword"\|"semantic"\|"visual", embedders?, stores?}` | Presets set the retriever mix and weights. Until M5 only platform embedders and stores are accepted (`byo_unavailable`) |
+| `retrieval` | `{preset?: "balanced"\|"keyword"\|"semantic"\|"visual", embedders?, stores?}` | Presets set the retriever mix and weights. BYO embedders and vector stores reference models and connections registered and validated first (`POST /models` + `/validate`, `POST /connections` + `/test`); the step runs the live checks of `docs/TENANT_CONFIG.md` §5 rules 3–6. The lexical index stays platform-hosted |
 | `policies` | `{in_stock?, ship_to_region?, verified_vendors?, rules?}` | Toggles become `policy.always_filters`. CEL `rules` are saved with a `deferred` warning; they are compiled and enforced from M7 |
 | `ranking` | `{mode?: "default", weights?}` | `default_linear` with optional weight overrides. `learned` and `byo` return `not_available` until M7 |
 | `personalization` | `{personalization?, diversity?, ads?}` | The config sections of the same names, with the range rules from `docs/TENANT_CONFIG.md` §5 |

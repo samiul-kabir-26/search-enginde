@@ -32,7 +32,10 @@ import (
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
 	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
+	"github.com/zavisoft/search-engine/internal/registry"
+	"github.com/zavisoft/search-engine/internal/security"
 	"github.com/zavisoft/search-engine/internal/tenant"
+	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 )
 
 const service = "indexer"
@@ -57,6 +60,10 @@ type config struct {
 	S3ModelsBucket  string
 	S3UploadBucket  string
 	JobPoll         time.Duration
+	S3PublicURL     string
+	Secrets         security.SecretBackend
+	EgressTrusted   string
+	BYOTimeout      time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -81,6 +88,10 @@ func loadConfig() (config, error) {
 		S3ModelsBucket:  env.Required("S3_BUCKET_MODELS"),
 		S3UploadBucket:  env.Required("S3_BUCKET_UPLOADS"),
 		JobPoll:         env.Duration("INDEXER_JOB_POLL", 2*time.Second),
+		S3PublicURL:     env.String("S3_PUBLIC_URL", ""),
+		Secrets:         security.SecretBackendFromEnv(env),
+		EgressTrusted:   env.String("EGRESS_TRUSTED_HOSTS", ""),
+		BYOTimeout:      env.Duration("BYO_TIMEOUT", 30*time.Second),
 	}
 	return c, env.Err()
 }
@@ -149,9 +160,17 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 		Region: cfg.S3Region, BaseEndpoint: aws.String(cfg.S3Endpoint), UsePathStyle: true,
 		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
 	})
+	secrets, err := security.NewSecretStore(cfg.Secrets, tenantdb.New(db))
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	// Catalog image URLs and BYO endpoints are tenant-supplied; only the platform's own image
+	// host (S3) and explicitly trusted hosts skip the egress checks.
+	egress := security.NewEgress(security.EgressConfig{Trusted: security.Hosts(cfg.EgressTrusted, cfg.S3Endpoint, cfg.S3PublicURL)})
 	builder := &indexer.Builder{Tenants: tenants, Triton: triton, OpenSearch: osClient, Qdrant: qClient,
-		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket}}
-	proc := indexer.NewProcessor(indexer.NewHTTPFetcher(cfg.ImageTimeout), log, cfg.ImageFetchLimit, cfg.Parallelism)
+		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
+		BYO:       &registry.BYO{Source: tenants, Secrets: secrets, Egress: egress, Timeout: cfg.BYOTimeout}}
+	proc := indexer.NewProcessor(indexer.NewHTTPFetcher(egress, cfg.ImageTimeout), log, cfg.ImageFetchLimit, cfg.Parallelism)
 
 	if backfill {
 		return runBackfill(ctx, cfg, tenants, slug, builder, proc, log)

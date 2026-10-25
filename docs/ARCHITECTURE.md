@@ -90,7 +90,9 @@ As implemented:
 ## 4. Registry
 
 - `registry.Registry` maps `(kind, type)` to a `Factory`, for example `("vector_store", "qdrant")` or `("scorer", "onnx")`.
-- A factory receives a `Spec` (the role's validated config block, the resolved tenant version, and the embedder dimensions that stores size their vectors from) plus a `Deps` struct. Today `Deps` holds the platform clients (Triton, OpenSearch, Qdrant, the centroid store) and the logger. M5 adds the EgressClient, SecretStore and Meter for BYO providers.
+- A factory receives a `Spec` (the role's validated config block, the resolved tenant version, and the embedder dimensions that stores size their vectors from) plus a `Deps` struct: the platform clients (Triton, OpenSearch, Qdrant, the centroid store), the logger, and for BYO providers `registry.BYO` (the tenant's registered models and connections, the `SecretStore`, the egress client and the per-tenant bulkheads).
+- BYO factories (`("embedder", "byo")`, `("vector_store", "byo")`) look up the referenced `tenant_models` or `tenant_connections` row, read its secret and build the adapter without any network I/O: gRPC and SQL connections are made by the first call, under that call's deadline, so a hung endpoint can never block a request outside a stage budget. A model or connection that is missing, not `validated`, or cannot be built becomes a provider whose every call fails; the stage then falls back like for any other failure, and the registry rebuilds it after 30 s. BYO providers are rebuilt every 5 min (`BYORefresh`) so connection edits and secret rotations are picked up.
+- The lexical index is always platform-hosted in v1; only vector stores and embedders can be BYO.
 - Built providers are cached per `(tenant_id, config_version, role)` in an LRU (roles: text/image embedders, lexical, vector store, centroids, pre-rank and rank scorers; the playground draft gets its own entries).
 - A provider leaves the cache when it is evicted, or when activation supersedes its version (`Supersede` keeps the active and shadow versions). It is closed only after a drain grace (30 s), so requests already running on it finish. A version that comes back (rollback) is rebuilt.
 - After an activation, search-api builds the new version's providers right away, so the first query does not pay for it.
@@ -107,6 +109,7 @@ As implemented:
 - Retrieval fan-out uses `errgroup`. One retriever failing does not fail the stage. The stage fails only if all retrievers fail, in which case the response is an empty result with a `degraded=true` flag, never a 5xx.
 - Merge uses Reciprocal Rank Fusion: `score = Σ w_r / (k + rank_r)`, with `k=60` by default and `w_r` per retriever from config.
 - The explain trace records, per stage: provider, version, latency, input/output counts, fallback flag, and per-candidate scores (top 50).
+- A vector retriever that depends on a BYO embedder or vector store falls back to the platform lexical index: when the store fails, times out or its breaker is open, or when S1 produced no vector because the BYO embedder failed (`no_vector`). The lexical search runs at most once per request, its hits are fused under `lexical_bm25` (so features stay truthful), and it is skipped when `lexical_bm25` already runs in the fan-out (its hits carry the request on their own). The trace records `vector_text:timeout>lexical_bm25`.
 - Breakers (per tenant, stage and provider) trip on 10 consecutive failures, or on a failure ratio of at least 50% over at least 20 calls in 10 s, and stay open for 3 s, so a transient overload costs seconds of degraded results rather than tens. A primary that has a fallback gets 75% of the remaining budget, so the fallback can still run. Client cancellations do not count as failures.
 
 ## 6. Stage specifications
@@ -169,7 +172,7 @@ Each retriever gets `k` from config (default 500, max 2000).
 
 **Rate limiting.** Redis GCRA per tenant, with limits set by the tenant's plan.
 
-**Bulkheads.** Each tenant gets a bounded concurrency semaphore for its BYO remote calls, so a slow tenant endpoint cannot exhaust the shared HTTP or gRPC pools.
+**Bulkheads.** Each tenant gets a bounded concurrency semaphore for its BYO remote calls (`BYO_MAX_CONCURRENCY`, default 32 per search-api), so a slow tenant endpoint cannot exhaust shared workers. A full bulkhead refuses the call at once (`bulkhead_full`) instead of queueing, so the stage's fallback runs with the budget left. BYO clients are per tenant and config version, never shared with the platform's pools. The chaos test (`internal/e2e`) holds another tenant's p95 steady while one tenant's endpoints hang.
 
 **Metrics.** Metrics carry a `tenant` label. Tenant count is bounded by plan, so cardinality stays bounded; this must be revisited if tenants exceed about 1,000.
 
@@ -190,14 +193,17 @@ Each retriever gets `k` from config (default 500, max 2000).
 
 ## 9. Security
 
-**Egress.**
-- Tenant endpoints must be `https`.
-- Hosts are resolved at registration and on every dial. Connections to private, loopback, link-local and metadata ranges (RFC 1918, 127/8, 169.254/16, ::1, fc00::/7) are rejected via a custom `net.Dialer.Control`.
-- An optional per-plan host allowlist applies on top.
+**Egress** (`security.Egress`).
+- Tenant endpoints must be `https` (pgvector: a `postgres://` URL with `sslmode=require`, `verify-ca` or `verify-full`). Credentials go in a secret, never in the URL.
+- Hosts are resolved at registration and on every dial. The dialer's `Control` hook checks the address actually being connected, after resolution, so a name that resolves (or later rebinds) to a private, loopback, link-local, metadata, CGNAT, documentation, multicast or reserved address (RFC 1918, 127/8, 169.254/16, 100.64/10, ::1, fc00::/7, fe80::/10, NAT64 and 6to4 prefixes, IPv4-mapped forms) is refused. gRPC clients use the `passthrough` resolver and pgx an identity lookup, so the dialer sees host names.
+- The plan's host allowlist (`plans.egress_allowlist`, exact names or `*.suffix`; empty means any public host) applies on top. HTTP clients use no proxy and follow no redirects.
+- Platform hosts (`EGRESS_TRUSTED_HOSTS`, plus the S3 hosts in the indexer) skip these checks; catalog image URLs go through the same egress client.
 
-**Secrets.**
-- Credentials for BYO stores and models are stored only via `SecretStore` and referenced by `secret_ref` in config.
-- Secrets are never returned by any API and never logged.
+**Secrets** (`security.SecretStore`).
+- Credentials for BYO stores and models are stored only via `SecretStore` and referenced by `secret_ref` (a ULID) from connections and models.
+- Dev (`SECRETS_BACKEND=mysql`): envelope encryption in `tenant_secrets`. Each secret has a random 256-bit data key (AES-256-GCM, bound to tenant and ID); the data key is stored wrapped by `SECRETS_MASTER_KEY`.
+- Prod (`SECRETS_BACKEND=vault`): Vault KV v2 at `{mount}/data/{prefix}/{tenant}/{ref}`.
+- Secrets are never returned by any API and never logged: values travel as `security.Secret`, which prints, logs and marshals as `[redacted]`.
 
 **CEL.**
 - Uses the restricted environment from `docs/TENANT_CONFIG.md` §5.

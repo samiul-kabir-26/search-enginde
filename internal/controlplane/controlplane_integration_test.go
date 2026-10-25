@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -74,6 +75,7 @@ type env struct {
 	keys     *auth.KeyRing
 	verifier *auth.Verifier
 	search   *fakeSearch
+	byo      *registry.BYO
 }
 
 // fakeSearch records what the playground proxy forwards.
@@ -127,8 +129,12 @@ func newEnv(t *testing.T) *env {
 	e.verifier = auth.NewLocalVerifier(keys, "http://issuer")
 	s3c := s3.New(s3.Options{Region: "us-east-1", BaseEndpoint: aws.String("http://localhost:9100"), UsePathStyle: true,
 		Credentials: credentials.NewStaticCredentialsProvider("a", "b", "")})
+	// Local test endpoints (127.0.0.1) stand in for tenant endpoints, so they are trusted.
+	tenants := tenant.NewStore(db)
+	e.byo = &registry.BYO{Source: tenants, Secrets: security.NewDBSecretStore(q, sealer), Timeout: 5 * time.Second,
+		Egress: security.NewEgress(security.EgressConfig{Trusted: []string{"127.0.0.1", "localhost"}})}
 	srv := &controlplane.Server{
-		DB: db, Q: q, Tenants: tenant.NewStore(db), Keys: keys, Verifier: e.verifier, Settings: settings,
+		DB: db, Q: q, Tenants: tenants, Keys: keys, Verifier: e.verifier, Settings: settings, BYO: e.byo,
 		Mailer: e.mailer, Redis: rdb, Idem: controlplane.NewIdempotency(rdb), Presign: s3.NewPresignClient(s3c),
 		UploadBucket: "catalog-uploads", SearchURL: search.URL, HTTPClient: http.DefaultClient,
 		AppBaseURL: "http://console", PlatformEmbedder: registry.PlatformEmbedderInfo, Log: log,
@@ -169,7 +175,7 @@ func (c *client) do(method, path string, body any, headers ...string) response {
 		j, _ := json.Marshal(b)
 		rd = bytes.NewReader(j)
 	}
-	req, _ := http.NewRequestWithContext(context.Background(), method, c.e.srv.URL+path, rd)
+	req, _ := http.NewRequestWithContext(c.e.t.Context(), method, c.e.srv.URL+path, rd)
 	req.Header.Set("Content-Type", "application/json")
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
@@ -244,11 +250,11 @@ func TestControlPlane(t *testing.T) {
 	t.Run("refresh rotation and reuse detection", func(t *testing.T) {
 		c := e.client()
 		c.expect(http.StatusOK, c.do("POST", "/v1/auth/login", map[string]string{"tenant": "acme", "email": "owner@acme.test", "password": password}), "login")
-		u, _ := http.NewRequest("GET", e.srv.URL+"/v1/", nil)
-		first := c.http.Jar.Cookies(u.URL)[0].Value
+		u, _ := url.Parse(e.srv.URL + "/v1/")
+		first := c.http.Jar.Cookies(u)[0].Value
 		c.expect(http.StatusOK, c.do("POST", "/v1/auth/refresh", nil), "refresh")
 		thief := e.client()
-		thief.http.Jar.SetCookies(u.URL, []*http.Cookie{{Name: controlplane.RefreshCookie, Value: first, Path: "/v1/"}})
+		thief.http.Jar.SetCookies(u, []*http.Cookie{{Name: controlplane.RefreshCookie, Value: first, Path: "/v1/"}})
 		thief.expect(http.StatusUnauthorized, thief.do("POST", "/v1/auth/refresh", nil), "reused refresh token")
 		c.expect(http.StatusUnauthorized, c.do("POST", "/v1/auth/refresh", nil), "the whole family is revoked after reuse")
 	})

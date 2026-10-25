@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/platform"
-	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
@@ -31,6 +32,24 @@ type Target struct {
 	ImageEmbedder pipeline.Embedder
 	Lexical       pipeline.LexicalWriter
 	Vectors       pipeline.VectorWriter
+	// BYO is set when the tenant uses its own embedders or vector store.
+	BYO     bool
+	closers []io.Closer
+}
+
+// Close releases the target's BYO connections (embedder and store clients).
+func (t *Target) Close() error {
+	var errs []error
+	for _, c := range t.closers {
+		errs = append(errs, c.Close())
+	}
+	for _, e := range []pipeline.Embedder{t.TextEmbedder, t.ImageEmbedder} {
+		if c, ok := e.(io.Closer); ok {
+			errs = append(errs, c.Close())
+		}
+	}
+	t.closers = nil
+	return errors.Join(errs...)
 }
 
 // ImageFetcher downloads a product image.
@@ -209,7 +228,7 @@ func (p *Processor) writeVectors(ctx context.Context, t *Target, docs []pipeline
 				missing++
 			}
 		}
-		points[i] = pipeline.VectorPoint{ProductID: d.Product.ProductID, Vectors: vecs, Payload: qdrant.Payload(d.Product, t.Registry)}
+		points[i] = pipeline.VectorPoint{ProductID: d.Product.ProductID, Vectors: vecs, Payload: vectorstore.Payload(d.Product, t.Registry)}
 	}
 	return missing, t.Vectors.Upsert(ctx, points)
 }

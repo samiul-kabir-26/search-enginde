@@ -150,8 +150,8 @@ test-integration: ## Run integration tests (testcontainers; needs Docker)
 .PHONY: cover
 cover: ## Coverage for the packages with an 80% target (unit + integration tests)
 	go test -tags integration -count=1 -coverprofile=coverage.out \
-		-coverpkg=$$(go list ./internal/pipeline/... ./internal/stages/... ./internal/tenant/... | grep -v -E 'stagestest|tenantdb' | paste -sd, -) \
-		./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/searchapi/...
+		-coverpkg=$$(go list ./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/security/... | grep -v -E 'stagestest|tenantdb' | paste -sd, -) \
+		./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/security/... ./internal/searchapi/... ./internal/e2e/...
 	@go tool cover -func=coverage.out | tail -1
 
 ##@ Run

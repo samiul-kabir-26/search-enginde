@@ -143,6 +143,8 @@ func Call[T any](ctx context.Context, b *Breakers, k Key, primary, fallback func
 	switch {
 	case errors.Is(err, gobreaker.ErrOpenState), errors.Is(err, gobreaker.ErrTooManyRequests):
 		reason = ReasonBreakerOpen
+	case errors.Is(err, ErrBulkheadFull):
+		reason = ReasonBulkhead
 	case errors.Is(err, context.DeadlineExceeded) || pctx.Err() != nil:
 		reason = ReasonTimeout
 	}

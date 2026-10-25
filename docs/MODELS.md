@@ -13,9 +13,14 @@ All remote models use the **KServe v2 / Open Inference Protocol** over gRPC. RES
 
 Preprocessing (tokenization, image resize and normalization) is the model server's responsibility. This guarantees parity between indexing and query time, because both call the same endpoint.
 
+**BYO `kserve_v2` endpoints.** A registered model names one KServe model (`name`, `version`) at `https://host[:port][/base]`. The adapter speaks gRPC by default; REST is the fallback transport, chosen when model validation finds that gRPC fails and REST works:
+- REST requests go to `POST {base}/v2/models/{name}[/versions/{version}]/infer`. Text is sent as JSON `BYTES` strings; images use the binary tensor data extension (Triton, KServe): a JSON header (`Inference-Header-Content-Length`) followed by each image as a 4-byte little-endian length and its bytes. The `EMBEDDING` output may come back as JSON data or binary data.
+- An image model with `supports_text_to_image` must accept `INPUT_TEXT` on the same model and embed into the same space.
+- The secret, when set, is sent as `authorization: Bearer …` (gRPC metadata or HTTP header).
+
 **BYO `openai_embeddings` (text only).**
 - Request: `POST {endpoint}/v1/embeddings` with `{model, input: [..]}`.
-- The response's `data[i].embedding` is read and L2-normalized client-side if not already normalized.
+- The response's `data[i].embedding` is read (ordered by `data[i].index`) and L2-normalized client-side if not already normalized. The registered model's `name` is the `model` field; the secret is the bearer token.
 
 **Batching.** Maximum batch size is declared per model; the adapter splits larger batches.
 

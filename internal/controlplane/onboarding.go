@@ -337,16 +337,6 @@ func (s *Server) stepRetrieval(r *http.Request, tid tenant.ID, body []byte) ([]p
 	if !ok {
 		return nil, nil, block(fieldErr("/preset", "invalid", "preset must be balanced, keyword, semantic or visual"))
 	}
-	var errs []platform.FieldError
-	if e := req.Embedders; e != nil && (e.Text.Provider == tenant.ProviderBYO || e.Image.Provider == tenant.ProviderBYO) {
-		errs = append(errs, fieldErr("/embedders", "byo_unavailable", "BYO embedders arrive in M5; use the platform models for now"))
-	}
-	if st := req.Stores; st != nil && (st.Lexical.Provider == tenant.ProviderBYO || st.Vector.Provider == tenant.ProviderBYO) {
-		errs = append(errs, fieldErr("/stores", "byo_unavailable", "BYO stores arrive in M5; use the platform stores for now"))
-	}
-	if len(errs) > 0 {
-		return nil, nil, block(errs...)
-	}
 	warnings, err := s.editDraft(r, tid, StepRetrieval, func(c *tenant.Config) error {
 		if req.Embedders != nil {
 			c.Embedders = *req.Embedders

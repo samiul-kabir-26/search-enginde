@@ -6,23 +6,23 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/zavisoft/search-engine/internal/security"
 )
 
 // MaxImageBytes matches the image upload limit (docs/API.md).
 const MaxImageBytes = 10 << 20
 
-// HTTPFetcher downloads images over HTTP with a size cap.
-//
-// Product image URLs come from tenant catalogs, so from M5 this must go through
-// security.EgressClient (SSRF-safe dialer plus allowlist) with the platform's own image host
-// allowed; until then it is only used with platform-hosted demo images.
+// HTTPFetcher downloads images with a size cap. Product image URLs come from tenant catalogs,
+// so the client is the egress client: https only and no private, loopback, link-local or
+// metadata addresses, except the platform's own (trusted) image host.
 type HTTPFetcher struct {
 	Client *http.Client
 }
 
-// NewHTTPFetcher returns a fetcher with a per-request timeout.
-func NewHTTPFetcher(timeout time.Duration) *HTTPFetcher {
-	return &HTTPFetcher{Client: &http.Client{Timeout: timeout}}
+// NewHTTPFetcher returns a fetcher over egress with a per-request timeout.
+func NewHTTPFetcher(egress *security.Egress, timeout time.Duration) *HTTPFetcher {
+	return &HTTPFetcher{Client: egress.HTTPClient(nil, timeout)}
 }
 
 // Fetch returns the body of url, failing on non-200 responses and bodies over MaxImageBytes.

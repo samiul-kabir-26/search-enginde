@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
@@ -216,11 +217,13 @@ func Matches(e filter.Expr, p Product) bool {
 	return false
 }
 
-// Lexical is a token-overlap index over Catalog. It records the last request.
+// Lexical is a token-overlap index over Catalog. It records the last request; concurrent
+// searches are safe, and tests read Last after their searches finish.
 type Lexical struct {
 	Products []Product
 	Fail     bool
 	Last     pipeline.LexicalSearch
+	mu       sync.Mutex
 }
 
 // Search implements pipeline.LexicalIndex.
@@ -228,7 +231,9 @@ func (l *Lexical) Search(_ context.Context, req pipeline.LexicalSearch) (pipelin
 	if l.Fail {
 		return pipeline.LexicalResult{}, errors.New("opensearch down")
 	}
+	l.mu.Lock()
 	l.Last = req
+	l.mu.Unlock()
 	all := filter.All(req.Base, req.Request)
 	type scored struct {
 		p Product
