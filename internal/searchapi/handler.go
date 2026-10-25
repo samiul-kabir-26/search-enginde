@@ -69,7 +69,10 @@ type Service struct {
 
 // Routes registers the search routes behind bearer auth.
 func (s *Service) Routes(mux *http.ServeMux, v *auth.Verifier) {
-	mux.Handle("POST /v1/search", auth.Middleware(v, auth.ScopeSearchRead)(http.HandlerFunc(s.handleSearch)))
+	read := auth.Middleware(v, auth.ScopeSearchRead)
+	mux.Handle("POST /v1/search", read(http.HandlerFunc(s.handleSearch)))
+	mux.Handle("POST /v1/search/image", read(http.HandlerFunc(s.handleImageSearch)))
+	mux.Handle("GET /v1/products/{product_id}/similar", read(http.HandlerFunc(s.handleSimilar)))
 }
 
 // SearchRequest is the body of POST /v1/search.
@@ -153,7 +156,11 @@ func validate(req *SearchRequest) []platform.FieldError {
 	case utf8.RuneCountInString(req.Q) > MaxQueryLength:
 		errs = append(errs, platform.FieldError{Path: "/q", Code: "too_long", Message: fmt.Sprintf("q is at most %d characters", MaxQueryLength)})
 	}
-	pg := &req.Page
+	return append(errs, validatePage(&req.Page)...)
+}
+
+func validatePage(pg *PageRequest) []platform.FieldError {
+	var errs []platform.FieldError
 	if pg.Size == 0 {
 		pg.Size = DefaultPageSize
 	}
@@ -194,50 +201,78 @@ func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, errs...)
 		return
 	}
+	res, ok := s.resolve(ctx, w, p)
+	if !ok {
+		return
+	}
+	reqFilter, ok := compileFilter(w, req.Filters, res)
+	if !ok {
+		return
+	}
+	q := &pipeline.Query{
+		Tenant: p.Tenant, ConfigVersion: res.ConfigVersion, Type: pipeline.QueryText, Raw: req.Q,
+		Filter: reqFilter, BaseFilter: res.AlwaysFilters, User: req.User, Facets: facetRequests(res.Config),
+	}
+	resp, ok := s.servePaged(ctx, w, p, res, q, req.Page, req.Explain,
+		pipeline.QueryText, queryunderstanding.Normalize(req.Q), reqFilter, req.User.ID)
+	if ok {
+		platform.WriteJSON(w, http.StatusOK, resp)
+	}
+}
 
+// resolve loads the caller's tenant and applies its rate limit, writing the error response
+// when either fails.
+func (s *Service) resolve(ctx context.Context, w http.ResponseWriter, p auth.Principal) (*tenant.Resolved, bool) {
 	res, err := s.Resolver.Get(ctx, p.Tenant)
 	if errors.Is(err, tenant.ErrNotFound) {
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusForbidden, Detail: "the tenant is unknown or inactive"})
-		return
+		return nil, false
 	}
 	if err != nil {
 		s.Log.Error("resolve tenant", "tenant", p.Tenant, "err", err)
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "tenant configuration is unavailable"})
-		return
+		return nil, false
 	}
-	if !s.admit(ctx, w, res) {
-		return
-	}
+	return res, s.admit(ctx, w, res)
+}
 
-	var reqFilter filter.Expr
-	if req.Filters != nil {
-		var errs []platform.FieldError
-		if reqFilter, errs = filter.Compile(*req.Filters, res.Registry, "/filters"); len(errs) > 0 {
-			badRequest(w, errs...)
-			return
-		}
+func compileFilter(w http.ResponseWriter, f *filter.Expr, res *tenant.Resolved) (filter.Expr, bool) {
+	if f == nil {
+		return filter.Expr{}, true
 	}
-	explain := req.Explain && p.Has(auth.ScopeSearchDebug)
+	c, errs := filter.Compile(*f, res.Registry, "/filters")
+	if len(errs) > 0 {
+		badRequest(w, errs...)
+		return filter.Expr{}, false
+	}
+	return c, true
+}
+
+// servePaged returns one page of q's results from its snapshot, running the pipeline when the
+// snapshot is missing. keyParts identify the query (everything that changes the order).
+func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.Principal, res *tenant.Resolved,
+	q *pipeline.Query, page PageRequest, explainRequested bool, keyParts ...any) (*SearchResponse, bool) {
+	explain := explainRequested && p.Has(auth.ScopeSearchDebug)
 	tid := string(p.Tenant)
-	key, err := SnapshotKey(res.ConfigVersion, pipeline.QueryText, queryunderstanding.Normalize(req.Q), reqFilter, req.User.ID)
+	key, err := SnapshotKey(append([]any{res.ConfigVersion}, keyParts...)...)
 	if err != nil {
 		s.fail(w, err)
-		return
+		return nil, false
 	}
-
+	hasCursor := page.Cursor != nil && *page.Cursor != ""
 	offset := 0
 	switch {
-	case req.Page.Cursor != nil && *req.Page.Cursor != "":
-		cur, err := s.Cursors.Decode(tid, *req.Page.Cursor)
+	case hasCursor:
+		cur, err := s.Cursors.Decode(tid, *page.Cursor)
 		if err != nil || cur.Snapshot != key || cur.ConfigVersion != res.ConfigVersion {
 			badRequest(w, platform.FieldError{Path: "/page/cursor", Code: "invalid_cursor", Message: "the cursor is invalid or belongs to a different query"})
-			return
+			return nil, false
 		}
 		offset = cur.Offset
-	case req.Page.Number != nil:
-		offset = (*req.Page.Number - 1) * req.Page.Size
-	case req.Page.Offset != nil:
-		offset = *req.Page.Offset
+	case page.Number != nil:
+		offset = (*page.Number - 1) * page.Size
+	case page.Offset != nil:
+		offset = *page.Offset
 	}
 
 	var snap *Snapshot
@@ -247,22 +282,16 @@ func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("snapshot read failed", "tenant", tid, "err", err)
 		}
 	}
-	if snap == nil && req.Page.Cursor != nil && *req.Page.Cursor != "" && !explain {
+	if snap == nil && hasCursor && !explain {
 		badRequest(w, platform.FieldError{Path: "/page/cursor", Code: "invalid_cursor", Message: "the cursor has expired; search again"})
-		return
+		return nil, false
 	}
 	if snap == nil {
-		providers, err := s.Providers.For(ctx, res)
-		if err != nil {
-			s.Log.Error("build providers", "tenant", tid, "err", err)
-			platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "search providers are unavailable"})
-			return
+		providers, ok := s.providers(ctx, w, res)
+		if !ok {
+			return nil, false
 		}
-		q := &pipeline.Query{
-			Tenant: p.Tenant, ConfigVersion: res.ConfigVersion, Type: pipeline.QueryText, Raw: req.Q,
-			Filter: reqFilter, BaseFilter: res.AlwaysFilters, User: req.User, Facets: facetRequests(res.Config),
-			Depth: max(res.Plan.MaxPageDepth, req.Page.Size), Explain: explain,
-		}
+		q.Depth, q.Explain = max(res.Plan.MaxPageDepth, page.Size), explain
 		var st *pipeline.State
 		st, tr = s.Engine.Run(ctx, res, providers, q)
 		snap = snapshotOf(res.ConfigVersion, st)
@@ -270,16 +299,25 @@ func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {
 			s.Log.Warn("snapshot write failed", "tenant", tid, "err", err)
 		}
 	}
-
-	resp, err := s.page(ctx, res, snap, key, offset, req.Page.Size)
+	resp, err := s.page(ctx, res, snap, key, offset, page.Size)
 	if err != nil {
 		s.fail(w, err)
-		return
+		return nil, false
 	}
 	if explain {
 		resp.Trace = tr
 	}
-	platform.WriteJSON(w, http.StatusOK, resp)
+	return resp, true
+}
+
+func (s *Service) providers(ctx context.Context, w http.ResponseWriter, res *tenant.Resolved) (*pipeline.Providers, bool) {
+	providers, err := s.Providers.For(ctx, res)
+	if err != nil {
+		s.Log.Error("build providers", "tenant", res.Tenant.ID, "err", err)
+		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "search providers are unavailable"})
+		return nil, false
+	}
+	return providers, true
 }
 
 // admit applies the plan's GCRA limit. A limiter outage fails open: availability beats strict

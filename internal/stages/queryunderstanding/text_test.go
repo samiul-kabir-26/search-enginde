@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
 )
 
@@ -68,5 +69,29 @@ func TestDictionary(t *testing.T) {
 	}
 	if got := d.Extract("redwood"); len(got) != 0 {
 		t.Errorf("terms must match whole words, got %v", got)
+	}
+}
+
+func TestVoteCategories(t *testing.T) {
+	hit := func(score float64, path ...string) pipeline.Hit {
+		return pipeline.Hit{Score: score, Doc: &pipeline.Doc{CategoryIDs: path}}
+	}
+	// Leaves are fragmented (each 20%), so the vote moves up to "chairs" (60%).
+	hits := []pipeline.Hit{
+		hit(1, "furniture", "chairs", "office-chairs"), hit(1, "furniture", "chairs", "gaming-chairs"),
+		hit(1, "furniture", "chairs", "dining-chairs"), hit(1, "furniture", "tables", "desks"),
+		hit(1, "furniture", "tables", "side-tables"), hit(0, "ignored"), {Score: 1},
+	}
+	got := VoteCategories(hits, 3, 0.5)
+	if len(got) != 1 || got[0].ID != "chairs" || got[0].Confidence != 0.6 {
+		t.Errorf("vote = %+v, want chairs 0.6", got)
+	}
+	// With a low threshold the leaf level already qualifies; ties break by id.
+	got = VoteCategories(hits, 2, 0.15)
+	if len(got) != 2 || got[0].ID != "desks" || got[0].Confidence != 0.2 {
+		t.Errorf("leaf vote = %+v", got)
+	}
+	if VoteCategories(nil, 3, 0.1) != nil {
+		t.Error("no hits, no categories")
 	}
 }

@@ -4,6 +4,7 @@ package qdrant
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -69,6 +70,13 @@ func TestStoreVersionsUpsertDelete(t *testing.T) {
 	hits, err = s.Search(ctx, pipeline.VectorSearch{Vector: "text", Query: vec(4, 1), K: 5, Filter: onlyActive, EF: 64})
 	if err != nil || len(hits) != 1 || hits[0].ProductID != "abo:1" || hits[0].Doc.PriceMinor != 10 || hits[0].Doc.ImageCount != 1 {
 		t.Fatalf("filtered search must push the filter down: %+v, %v", hits, err)
+	}
+	got, doc, err := s.Get(ctx, "abo:1")
+	if err != nil || len(got.Vectors["text"]) != 4 || len(got.Vectors["image"]) != 3 || doc.PriceMinor != 10 {
+		t.Fatalf("get = %+v %+v %v", got, doc, err)
+	}
+	if _, _, err := s.Get(ctx, "nope"); !errors.Is(err, pipeline.ErrNotFound) {
+		t.Errorf("missing product: %v", err)
 	}
 	var scrolled []string
 	if err := s.ScrollVectors(ctx, 1, "text", func(id string, v []float32, cats []string) error {

@@ -275,3 +275,30 @@ func (s *Store) ScrollVectors(ctx context.Context, v int, vector string, fn func
 		offset = next
 	}
 }
+
+// Get returns a product's stored named vectors and ranking doc (similar-items anchors).
+func (s *Store) Get(ctx context.Context, productID string) (*pipeline.VectorPoint, *pipeline.Doc, error) {
+	points, err := s.client.Get(ctx, &qdrant.GetPoints{
+		CollectionName: s.target,
+		Ids:            []*qdrant.PointId{qdrant.NewID(catalog.PointID(productID))},
+		WithVectors:    qdrant.NewWithVectors(true),
+		WithPayload:    qdrant.NewWithPayloadInclude(payloadFields...),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("get %s from %s: %w", productID, s.target, err)
+	}
+	if len(points) == 0 {
+		return nil, nil, fmt.Errorf("product %s: %w", productID, pipeline.ErrNotFound)
+	}
+	p := points[0]
+	vecs := map[string][]float32{}
+	for name, out := range p.GetVectors().GetVectors().GetVectors() {
+		v := out.GetDense().GetData()
+		if len(v) == 0 {
+			v = out.GetData() //nolint:staticcheck // servers before the dense field fill data
+		}
+		vecs[name] = v
+	}
+	_, doc := docFromPayload(p.GetPayload())
+	return &pipeline.VectorPoint{ProductID: productID, Vectors: vecs}, doc, nil
+}

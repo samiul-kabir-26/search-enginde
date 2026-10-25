@@ -46,10 +46,41 @@ type Budgets struct {
 	S4MS    int `json:"s4_ms"`
 	S5MS    int `json:"s5_ms"`
 	S6MS    int `json:"s6_ms"`
+	// Image overrides budgets for image and similar-item queries; zero fields inherit. Image
+	// embedding on CPU needs a larger S1 than text.
+	Image *StageBudgets `json:"image,omitempty"`
+}
+
+// StageBudgets is a set of budget overrides.
+type StageBudgets struct {
+	TotalMS int `json:"total_ms,omitempty"`
+	S1MS    int `json:"s1_ms,omitempty"`
+	S2MS    int `json:"s2_ms,omitempty"`
+	S3MS    int `json:"s3_ms,omitempty"`
+	S4MS    int `json:"s4_ms,omitempty"`
+	S5MS    int `json:"s5_ms,omitempty"`
+	S6MS    int `json:"s6_ms,omitempty"`
 }
 
 // Stages returns the stage budgets in pipeline order.
 func (b Budgets) Stages() [6]int { return [6]int{b.S1MS, b.S2MS, b.S3MS, b.S4MS, b.S5MS, b.S6MS} }
+
+// ForImage returns the budgets with the image overrides applied.
+func (b Budgets) ForImage() Budgets {
+	out := b
+	out.Image = nil
+	if o := b.Image; o != nil {
+		pick := func(over, base int) int {
+			if over > 0 {
+				return over
+			}
+			return base
+		}
+		out.TotalMS, out.S1MS, out.S2MS = pick(o.TotalMS, b.TotalMS), pick(o.S1MS, b.S1MS), pick(o.S2MS, b.S2MS)
+		out.S3MS, out.S4MS, out.S5MS, out.S6MS = pick(o.S3MS, b.S3MS), pick(o.S4MS, b.S4MS), pick(o.S5MS, b.S5MS), pick(o.S6MS, b.S6MS)
+	}
+	return out
+}
 
 // CatalogConfig is the `catalog` section.
 type CatalogConfig struct {

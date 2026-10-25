@@ -33,6 +33,10 @@ type Query struct {
 	TextVector        []float32
 	TextToImageVector []float32
 	ImageVector       []float32
+	// ImageBytes is the validated, re-encoded upload of an image query (embedded in S1).
+	ImageBytes []byte
+	// AnchorID is the product a similar-items query starts from; it is excluded from results.
+	AnchorID string
 	// Filter is the compiled request filter, including filters derived in S1 (price phrases).
 	Filter filter.Expr
 	// BaseFilter is the tenant's compiled always_filters; it is never shown as a facet selection.

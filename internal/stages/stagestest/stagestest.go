@@ -139,6 +139,8 @@ func Matches(e filter.Expr, p Product) bool {
 	c := e.Cond
 	var vals []any
 	switch c.Field {
+	case "product_id":
+		vals = []any{p.ID}
 	case "brand":
 		vals = []any{p.Brand}
 	case "status":
@@ -339,6 +341,18 @@ func (v *Vectors) Search(_ context.Context, req pipeline.VectorSearch) ([]pipeli
 		hits = hits[:req.K]
 	}
 	return hits, nil
+}
+
+// Get implements pipeline.VectorStore.
+func (v *Vectors) Get(_ context.Context, id string) (*pipeline.VectorPoint, *pipeline.Doc, error) {
+	for _, p := range v.Products {
+		if p.ID == id {
+			return &pipeline.VectorPoint{ProductID: id, Vectors: map[string][]float32{
+				pipeline.VectorText: Embed(p.Title, v.Dim), pipeline.VectorImage: Embed(p.Title+" photo", v.Dim),
+			}}, p.doc(), nil
+		}
+	}
+	return nil, nil, pipeline.ErrNotFound
 }
 
 // Upsert implements pipeline.VectorStore.

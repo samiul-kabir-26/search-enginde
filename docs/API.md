@@ -64,11 +64,15 @@ Filter operators: `eq`, `ne`, `in`, `nin`, `gt`, `gte`, `lt`, `lte`, `contains`,
 | `q` | no | Refinement text, fused with RRF |
 | `filters`, `user`, `page`, `explain` | no | JSON parts, same as text search |
 
-The response matches `/v1/search`, plus `"predicted_categories": [{ "id": "...", "confidence": 0.72 }]`.
+The response matches `/v1/search`, plus `"predicted_categories": [{ "id": "...", "confidence": 0.72 }]` (a similarity-weighted vote over the categories of the 50 nearest image neighbours).
+
+- The image is accepted by magic bytes only; its header must report at most 4096×4096 before it is decoded; the crop is applied; it is scaled to a 336 px short side and re-encoded as JPEG, which drops EXIF and other metadata. 413 for more than 10 MB, 415 for other formats, 400 (path `/image` or `/crop`) for undecodable files and crops outside the image.
+- JSON parts may be plain form fields or file parts. Paging and cursors work as in text search; the snapshot is keyed by the image content, crop, text, filters and user.
+- Without `q` only `vector_image` runs and no facets are returned; with `q` the text retrievers join the RRF fusion and facets are computed from the text matches.
 
 ### GET /v1/products/{product_id}/similar?size=24  (scope `search:read`)
 
-Uses the product's stored vectors; no upload required.
+Uses the product's stored vectors; no upload required. Runs `vector_image` and `vector_text` with the tenant's always_filters, excludes the product, ranks with the tenant's scorers and returns at most `size` (1–100, default 24) results without paging. 404 when the product is not indexed.
 
 ### POST /v1/events  (scope `events:write`)
 

@@ -7,6 +7,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/feature"
 	"github.com/zavisoft/search-engine/internal/resilience"
+	"github.com/zavisoft/search-engine/internal/stages/retrieval"
 	"github.com/zavisoft/search-engine/internal/stages/scoring"
 )
 
@@ -38,10 +39,7 @@ func BuildFeatures(st *pipeline.State, now time.Time) {
 	for _, c := range q.Categories {
 		cats[c.ID] = c.Confidence
 	}
-	total := len(st.Resolved.Config.Retrieval.Text.Retrievers)
-	if q.Type == pipeline.QueryImage {
-		total = len(st.Resolved.Config.Retrieval.Image.Retrievers)
-	}
+	total := len(retrieval.Retrievers(st.Resolved.Config, q))
 	in := make([]feature.Input, len(st.Candidates))
 	for i, c := range st.Candidates {
 		scores := make(map[string]float64, len(c.Retrievers))

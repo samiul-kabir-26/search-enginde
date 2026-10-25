@@ -43,10 +43,7 @@ type outcome struct {
 func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, error) {
 	q, res := st.Query, st.Resolved
 	rep := pipeline.Report{Provider: "rrf"}
-	cfgs := res.Config.Retrieval.Text.Retrievers
-	if q.Type == pipeline.QueryImage {
-		cfgs = res.Config.Retrieval.Image.Retrievers
-	}
+	cfgs := Retrievers(res.Config, q)
 
 	var (
 		mu       sync.Mutex
@@ -70,7 +67,7 @@ func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, e
 			return nil
 		})
 	}
-	needFacets := len(q.Facets) > 0 && !hasRetriever(cfgs, tenant.RetrieverLexicalBM25)
+	needFacets := len(q.Facets) > 0 && q.Text != "" && !hasRetriever(cfgs, tenant.RetrieverLexicalBM25)
 	if needFacets {
 		g.Go(func() error {
 			r, err := st.Providers.Lexical.Search(gctx, pipeline.LexicalSearch{Base: q.BaseFilter, Request: q.Filter, Facets: q.Facets})
@@ -106,6 +103,40 @@ func (s *Stage) Run(ctx context.Context, st *pipeline.State) (pipeline.Report, e
 	}
 	st.Candidates = pipeline.FuseRRF(results, res.Config.Retrieval.RRFK)
 	return rep, nil
+}
+
+// similarK is the per-retriever depth of similar-item queries when the config does not list
+// vector_image or vector_text.
+const similarK = 200
+
+// Retrievers returns the retrievers for the query type (docs/ARCHITECTURE.md §6 S2): the text
+// set; the image set plus the text set when an image query carries refinement text; or
+// vector_image and vector_text on the anchor's stored vectors for similar items.
+func Retrievers(cfg *tenant.Config, q *pipeline.Query) []tenant.RetrieverConfig {
+	text, image := cfg.Retrieval.Text.Retrievers, cfg.Retrieval.Image.Retrievers
+	switch q.Type {
+	case pipeline.QueryImage:
+		out := append([]tenant.RetrieverConfig(nil), image...)
+		if q.Text != "" {
+			for _, r := range text {
+				if !hasRetriever(out, r.Name) {
+					out = append(out, r)
+				}
+			}
+		}
+		return out
+	case pipeline.QuerySimilar:
+		pick := func(list []tenant.RetrieverConfig, name string) tenant.RetrieverConfig {
+			for _, r := range list {
+				if r.Name == name {
+					return tenant.RetrieverConfig{Name: name, K: r.K, Weight: 1}
+				}
+			}
+			return tenant.RetrieverConfig{Name: name, K: similarK, Weight: 1}
+		}
+		return []tenant.RetrieverConfig{pick(image, tenant.RetrieverVectorImage), pick(text, tenant.RetrieverVectorText)}
+	}
+	return text
 }
 
 func hasRetriever(cfgs []tenant.RetrieverConfig, name string) bool {

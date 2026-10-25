@@ -174,3 +174,24 @@ func TestResolverCachesAndInvalidates(t *testing.T) {
 		t.Errorf("inactive tenant: %v", err)
 	}
 }
+
+func TestImageBudgets(t *testing.T) {
+	c := defaultConfig(t)
+	img := c.Budgets.ForImage()
+	if img.S1MS != 130 || img.S2MS != 80 || img.TotalMS != 300 || img.Image != nil {
+		t.Errorf("image budgets = %+v", img)
+	}
+	if b := (Budgets{TotalMS: 100, S1MS: 10}).ForImage(); b.S1MS != 10 || b.TotalMS != 100 {
+		t.Errorf("without overrides the text budgets apply: %+v", b)
+	}
+	c.Budgets.Image.S1MS = 400
+	got := codes(c.Validate(context.Background(), ValidationDeps{Plan: growth, PlatformEmbedder: platformModels}))
+	if got["/budgets/image"] != "stages_exceed_total" {
+		t.Errorf("image stage budgets above the total must fail: %v", got)
+	}
+	c.Budgets.Image.TotalMS = 900
+	got = codes(c.Validate(context.Background(), ValidationDeps{Plan: growth, PlatformEmbedder: platformModels}))
+	if got["/budgets/image/total_ms"] != "exceeds_plan" {
+		t.Errorf("image total above the plan maximum must fail: %v", got)
+	}
+}

@@ -22,6 +22,9 @@ var ErrUnsupported = errors.New("unsupported by this provider")
 // image), as opposed to being unavailable. Retrying the same input will not help.
 var ErrInvalidInput = errors.New("invalid input")
 
+// ErrNotFound is returned when a requested product does not exist in a store.
+var ErrNotFound = errors.New("not found")
+
 // Embedder turns text or encoded images into L2-normalized vectors of Dim() dimensions.
 type Embedder interface {
 	EmbedText(ctx context.Context, texts []string) ([][]float32, error)
@@ -57,6 +60,8 @@ type VectorWriter interface {
 type VectorStore interface {
 	VectorWriter
 	Search(ctx context.Context, req VectorSearch) ([]Hit, error)
+	// Get returns a product's stored vectors and ranking doc, or ErrNotFound.
+	Get(ctx context.Context, productID string) (*VectorPoint, *Doc, error)
 }
 
 // IndexDoc is a product write ordered by the catalog event's source version.

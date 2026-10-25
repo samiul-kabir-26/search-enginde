@@ -45,6 +45,15 @@ curl -s localhost:8080/v1/search -H "Authorization: Bearer $TOKEN" \
 make loadtest         # k6 at 50 RPS (target p95 <= 150 ms)
 ```
 
+### Image search and similar items (M3)
+
+```bash
+curl -s localhost:8080/v1/search/image -H "Authorization: Bearer $TOKEN" \
+  -F image=@photo.jpg -F 'page={"size":10}' -F q=leather
+curl -s "localhost:8080/v1/products/abo:B000FTHD9W/similar?size=8" -H "Authorization: Bearer $TOKEN"
+make eval             # image eval: recall@10/50, MRR -> tools/eval/reports/
+```
+
 Product data comes from [Amazon Berkeley Objects](https://amazon-berkeley-objects.s3.amazonaws.com/index.html)
 (CC BY 4.0, credit Amazon.com); see `tools/dataprep/ATTRIBUTION.md`.
 

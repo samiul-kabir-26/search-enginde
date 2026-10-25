@@ -42,7 +42,12 @@ paths:
     post:
       operationId: searchImage
       summary: Image search
-      description: Scope `search:read`. Optional refinement text is fused with RRF.
+      description: |
+        Scope `search:read`. The image is validated by magic bytes (JPEG, PNG or WebP), its header must
+        report at most 4096x4096 before it is decoded, the optional crop is applied, and it is re-encoded
+        to JPEG (dropping EXIF) before embedding. Optional refinement text `q` adds the text retrievers,
+        fused with RRF, and enables facets. JSON parts may be sent as fields or as file parts. Paging
+        works as in `/v1/search` (the snapshot is keyed by the image content, crop, text, filters and user).
       requestBody:
         required: true
         content:
@@ -75,15 +80,20 @@ paths:
               schema: { $ref: "#/components/schemas/ImageSearchResponse" }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
         "413": { $ref: "#/components/responses/Problem" }
         "415": { $ref: "#/components/responses/Problem" }
         "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /v1/products/{product_id}/similar:
     get:
       operationId: similarProducts
       summary: Similar items from the product's stored vectors
-      description: Scope `search:read`.
+      description: |
+        Scope `search:read`. Runs `vector_image` and `vector_text` on the product's stored vectors,
+        applies the tenant's always_filters, excludes the product itself and ranks with the tenant's
+        scorers. Returns at most `size` results without paging.
       parameters:
         - { name: product_id, in: path, required: true, schema: { type: string } }
         - { name: size, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 24 } }
@@ -93,8 +103,12 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SearchResponse" }
+        "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
         "404": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /v1/events:
     post:
@@ -300,8 +314,10 @@ components:
       allOf:
         - $ref: "#/components/schemas/SearchResponse"
         - type: object
+          required: [predicted_categories]
           properties:
             predicted_categories:
+              description: Similarity-weighted vote over the leaf categories of the 50 nearest image neighbours.
               type: array
               items:
                 type: object

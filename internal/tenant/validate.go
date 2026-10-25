@@ -66,22 +66,28 @@ func (v *validator) fail(path, code, format string, args ...any) {
 }
 
 func (c *Config) validateBudgets(v *validator, plan Plan) {
-	b := c.Budgets
+	validateBudgetSet(v, "/budgets", c.Budgets, plan)
+	if c.Budgets.Image != nil {
+		validateBudgetSet(v, "/budgets/image", c.Budgets.ForImage(), plan)
+	}
+}
+
+func validateBudgetSet(v *validator, base string, b Budgets, plan Plan) {
 	if b.TotalMS <= 0 {
-		v.fail("/budgets/total_ms", "out_of_range", "total_ms must be > 0")
+		v.fail(base+"/total_ms", "out_of_range", "total_ms must be > 0")
 	}
 	if plan.MaxTotalMS > 0 && b.TotalMS > plan.MaxTotalMS {
-		v.fail("/budgets/total_ms", "exceeds_plan", "total_ms %d exceeds the %s plan maximum of %d", b.TotalMS, plan.ID, plan.MaxTotalMS)
+		v.fail(base+"/total_ms", "exceeds_plan", "total_ms %d exceeds the %s plan maximum of %d", b.TotalMS, plan.ID, plan.MaxTotalMS)
 	}
 	sum := 0
 	for i, s := range b.Stages() {
 		if s <= 0 {
-			v.fail(fmt.Sprintf("/budgets/s%d_ms", i+1), "out_of_range", "stage budgets must be > 0")
+			v.fail(fmt.Sprintf("%s/s%d_ms", base, i+1), "out_of_range", "stage budgets must be > 0")
 		}
 		sum += s
 	}
 	if sum > b.TotalMS {
-		v.fail("/budgets", "stages_exceed_total", "stage budgets sum to %d ms, more than total_ms %d", sum, b.TotalMS)
+		v.fail(base, "stages_exceed_total", "stage budgets sum to %d ms, more than total_ms %d", sum, b.TotalMS)
 	}
 }
 

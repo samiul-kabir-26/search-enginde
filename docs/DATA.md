@@ -141,6 +141,7 @@ The data-prep scripts do not compute embeddings, so indexing and query use the s
 - For each sampled indexed product with an `other_image_id`, the alternate image is the query.
 - The relevant set is the product itself (grade 3) plus products with the same brand and product_type (grade 1).
 - Metrics: recall@10, recall@50, MRR.
+- As implemented (`tools/eval/image.py`, `make eval`): queries whose product the default always_filters hide (inactive or out of stock) are skipped, and hidden products never count as relevant. The headline recall@k and MRR use the product itself; graded-set recall and nDCG@10 use the full graded set. Reports are written to `tools/eval/reports/`.
 
 **Text eval** (`data/eval/text_queries.jsonl`):
 - Queries are generated from templates over catalog attributes, for example `"{color} {material} {product_type}"`, `"{brand} {product_type}"` and `"{product_type} under {price}"`.

@@ -64,10 +64,10 @@ jobs:
       - uses: astral-sh/setup-uv@v10.3.2
         with:
           version: "0.13.5"
-      - run: uv sync --frozen --group dev
+      - run: uv sync --frozen --group dev --group eval
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run --frozen pytest -q dataprep
+      - run: uv run --frozen pytest -q dataprep eval
 
   web:
     runs-on: ubuntu-24.04

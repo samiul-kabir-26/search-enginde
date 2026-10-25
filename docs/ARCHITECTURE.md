@@ -111,7 +111,8 @@ As implemented:
 ### S1 Query understanding
 
 - Text: normalize (Unicode NFKC, lowercase, whitespace collapse). Extract attributes (color, material, size, price phrases) with a tenant-extensible dictionary. Price phrases become a pushdown `price_minor` filter. Predict the category by kNN vote over the category centroids of the text embedding (top 3 by a softmax over cosine similarity, confidence ≥ 0.15). An embedder failure skips the vector retrievers for that request and is reported as a fallback.
-- Image: validate via `internal/imaging` (see §9), apply the optional crop box, embed the image, and predict the category by majority vote over the categories of the top-50 image neighbors.
+- Image: validate via `internal/imaging` (see §9), apply the optional crop box, embed the image, and predict the category by majority vote over the categories of the top-50 image neighbors (weighted by similarity; it votes on leaf categories and moves up one level of the category paths while no category reaches a 15% share). Image and similar-item queries use the `budgets.image` overrides.
+- Similar: the handler loads the anchor's stored `text` and `image` vectors and excludes the anchor with a pushed-down `product_id ne` filter; the anchor's leaf category is the predicted category.
 - Output is a `Query` struct: normalized text, attributes, predicted categories with confidence, embeddings per vector name, request filters, user context.
 
 ### S2 Retrieval

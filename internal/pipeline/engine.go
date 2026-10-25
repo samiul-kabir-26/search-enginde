@@ -136,6 +136,9 @@ func stageBudget(b tenant.Budgets, stage string) int {
 func (e *Engine) Run(ctx context.Context, res *tenant.Resolved, p *Providers, q *Query) (*State, *Trace) {
 	start := e.now()
 	budgets := res.Config.Budgets
+	if q.Type == QueryImage || q.Type == QuerySimilar {
+		budgets = budgets.ForImage()
+	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(budgets.TotalMS)*time.Millisecond)
 	defer cancel()
 

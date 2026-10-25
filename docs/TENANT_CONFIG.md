@@ -34,7 +34,10 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
 {
   "schema_version": 1,
   "locale": "en",
-  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 120, "s3_ms": 10, "s4_ms": 15, "s5_ms": 40, "s6_ms": 30 },
+  "budgets": {
+    "total_ms": 300, "s1_ms": 40, "s2_ms": 120, "s3_ms": 10, "s4_ms": 15, "s5_ms": 40, "s6_ms": 30,
+    "image": { "s1_ms": 130, "s2_ms": 80, "s3_ms": 5, "s4_ms": 10, "s5_ms": 25, "s6_ms": 20 }
+  },
 
   "catalog": {
     "ingestion": "events",
@@ -157,7 +160,7 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 "rerank": { "model": { "type": "kserve_v2", "model_id": "01J..." }, "diversity": { ... } }
 ```
 
-**Budgets.** The defaults give S2 the largest share because it fans out to three stores, and S5 only 40 ms because `default_linear` scores in under a millisecond; a tenant with a remote rank model moves budget back to S5.
+**Budgets.** `budgets.image` overrides any stage budget for image and similar-item queries (zero fields inherit): embedding an image on CPU needs a larger S1 than text (default `s1_ms` 130), and the default stays within the smallest plan maximum (300 ms). The defaults give S2 the largest share because it fans out to three stores, and S5 only 40 ms because `default_linear` scores in under a millisecond; a tenant with a remote rank model moves budget back to S5.
 
 **Optional sections.** `query.attributes` extends the built-in S1 attribute dictionary (colours, materials, sizes) with tenant terms. `facets` replaces the default facets (`category_ids`, `brand`, `price_minor` ranges, `ship_regions`); numeric fields need `ranges` (half-open `[from, to)`), keyword fields take a `size`. `retrieval.ef` is the HNSW search breadth (default 128). `field_boosts` keys are canonical searchable fields or `custom.{name}`.
 
@@ -167,7 +170,7 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 
 **Budgets**
 1. `budgets.total_ms` must be ≤ the plan maximum.
-2. The sum of stage budgets must be ≤ `total_ms`.
+2. The sum of stage budgets must be ≤ `total_ms`. Both rules also apply to the effective image budgets (`budgets.image` over the text budgets).
 
 **Embedders and stores**
 3. Embedder output dimension must equal the corresponding vector store `dim`. Checked via a live embed of a fixed probe input.

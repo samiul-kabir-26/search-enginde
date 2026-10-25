@@ -9,7 +9,19 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M2 is done** (M1 and M0 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M3 is done** (M0–M2 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M3 verification (2026-10-25, same laptop):
+
+| Check | Result |
+|---|---|
+| `make eval` (image suite) | 1,119 queries: **recall@10 0.583**, recall@50 0.727, MRR 0.388 (product itself); graded-set recall@10 0.149, nDCG@10 0.411; categories predicted for 91%; 0 degraded. Raw image kNN without ranking scores recall@10 0.535 on a 400-query sample, so ranking helps; the remaining misses are mostly alternate photos showing a different view. Report: `tools/eval/reports/2026-10-25_v1.md` |
+| Image latency | p95 166 ms with 4 concurrent clients (target 250 ms); single requests 56–84 ms end to end with the vectors warm |
+| Similar items | 22 ms; anchor excluded, always_filters applied |
+| Uploads | Magic-byte sniffing, header dimension check, crop, downscale and EXIF-stripping re-encode; polyglot, truncated, oversized and decompression-bomb cases rejected (tests) |
+| Environment note | The laptop swaps (3.6 of 4 GB swap in use with every service, Triton, an IDE and a browser); Qdrant's image vectors were paged out after an hour unused and the first image queries took up to 2.8 s until warm |
+
+M2 verification:
 
 M2 verification (2026-10-25, same laptop, everything running locally including Chrome and the IDE):
 
@@ -70,6 +82,10 @@ M0 verification:
 | D20 | Breakers trip after 10 consecutive failures or ≥ 50% of ≥ 20 calls; ORT text encoders run 2 instances × 2 threads | With 5 consecutive failures and 4 threads, CPU oversubscription under load opened the embedder breakers; tuned until 50 RPS ran clean. |
 | D21 | The catalog topic is compacted; Qdrant `indexing_threshold` is 1,000 KB and payloads are `memory: cached` | Backfills read each product once; HNSW is built for small tenants (filtered top-500 search: 102 ms → 9 ms). |
 | D23 | Default stage budgets move 40 ms from S5 to S2 (`s2_ms` 120, `s5_ms` 40; total still 300) | `default_linear` ranks in < 1 ms while S2 runs three retrievers; at 80 ms, CPU contention timed out vector retrieval. The demo tenant's stored v1 was updated in place (dev data). |
+| D24 | `budgets.image` overrides stage budgets for image and similar queries (default `s1_ms` 130, total 300 to fit every plan) | Image embedding on CPU (~35–60 ms plus the category vote) cannot fit the 40 ms text S1. |
+| D25 | Image queries without `q` return no facets; `q` adds the text retrievers and facets | Facets come from the lexical match set (R4); an image-only query has none. |
+| D26 | The image category vote falls back up the category path when no leaf reaches 15% | ABO's 1,336 fine leaf categories made leaf-only votes empty for most queries (91% now get categories). |
+| D27 | Similar items returns at most `size` results without snapshot or cursor | The spec defines only `size`; similar lists are short and cheap (22 ms). |
 | D22 | The tenant attribute dictionary is a new optional `query.attributes` section; facets are a new optional `facets` section; `retrieval.ef` is optional | The spec named the features but not where their config lives. |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
@@ -260,16 +276,16 @@ Carried forward: load and isolation testing on dedicated hardware (M10), where b
 
 ---
 
-## M3 — Image search and similar items
+## M3 — Image search and similar items ✅
 
-**Done when:** image-eval recall@10 is reported (`docs/DATA.md` §7), and p95 ≤ 250 ms excluding upload.
+**Done when:** image-eval recall@10 is reported (`docs/DATA.md` §7), and p95 ≤ 250 ms excluding upload. **Met: recall@10 0.583, p95 166 ms.**
 
-- [ ] `internal/imaging`: ≤ 10 MB, magic-byte sniffing (JPEG, PNG, WebP via `x/image/webp`), `DecodeConfig` ≤ 4096², crop box, JPEG re-encode (strips EXIF)
-- [ ] S1 image: CLIP image embedding; category = majority vote over the top-50 image neighbors
-- [ ] `POST /v1/search/image` multipart (image, crop, q, filters, user, page, explain); `vector_image` plus text retrievers fused with RRF when `q` is present; `predicted_categories`
-- [ ] `GET /v1/products/{id}/similar`: anchor's stored vectors → `vector_image` + `vector_text`, excluding the anchor
-- [ ] `tools/eval`: build `data/eval/image_queries.jsonl` (alternate images); recall@10, recall@50, MRR report
-- [ ] Unit tests for imaging (malformed, oversized, polyglot files) and image-query p95 check
+- [x] `internal/imaging`: ≤ 10 MB, magic-byte sniffing (JPEG, PNG, WebP via `x/image/webp`), format-specific `DecodeConfig` ≤ 4096² before decoding, crop box, downscale to a 336 px short side, JPEG re-encode (strips EXIF)
+- [x] S1 image: CLIP image embedding; category = similarity-weighted majority vote over the top-50 image neighbours with leaf-to-parent fallback (**D26**); `budgets.image` (**D24**)
+- [x] `POST /v1/search/image` multipart (image, crop, q, filters, user, page, explain) with the same paging and snapshots as text search; `vector_image` plus text retrievers fused with RRF when `q` is present (**D25**); `predicted_categories`
+- [x] `GET /v1/products/{id}/similar`: anchor's stored vectors → `vector_image` + `vector_text`, anchor excluded by a pushed-down filter (**D27**)
+- [x] `tools/eval`: builds `data/eval/image_queries.jsonl` (alternate images, graded relevance); recall@10, recall@50, MRR, graded recall, nDCG@10 and latency; report in `tools/eval/reports/`
+- [x] Unit tests for imaging (malformed, oversized, polyglot, EXIF) and handlers; image-query p95 measured by the eval (166 ms)
 
 ---
 
