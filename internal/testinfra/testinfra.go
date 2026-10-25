@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/testcontainers/testcontainers-go"
 	tcmysql "github.com/testcontainers/testcontainers-go/modules/mysql"
 	tcopensearch "github.com/testcontainers/testcontainers-go/modules/opensearch"
 	tcqdrant "github.com/testcontainers/testcontainers-go/modules/qdrant"
+	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 	tcredpanda "github.com/testcontainers/testcontainers-go/modules/redpanda"
 )
 
@@ -24,6 +26,7 @@ const (
 	QdrantImage     = "qdrant/qdrant:v1.20.0"
 	RedpandaImage   = "redpandadata/redpanda:v26.2.6"
 	MySQLImage      = "mysql:8.4.13"
+	RedisImage      = "redis:7.4.11-alpine"
 )
 
 func terminate(t *testing.T, c testcontainers.Container) {
@@ -110,4 +113,20 @@ func MySQL(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return dsn
+}
+
+// Redis starts Redis and returns host:port.
+func Redis(t *testing.T) string {
+	t.Helper()
+	ctx := context.Background()
+	c, err := tcredis.Run(ctx, RedisImage)
+	terminate(t, c)
+	if err != nil {
+		t.Fatalf("start redis: %v", err)
+	}
+	uri, err := c.ConnectionString(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimPrefix(uri, "redis://")
 }

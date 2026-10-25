@@ -12,6 +12,133 @@ import (
 	"time"
 )
 
+type IndexJobsSource string
+
+const (
+	IndexJobsSourceTopic  IndexJobsSource = "topic"
+	IndexJobsSourceUpload IndexJobsSource = "upload"
+)
+
+func (e *IndexJobsSource) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = IndexJobsSource(s)
+	case string:
+		*e = IndexJobsSource(s)
+	default:
+		return fmt.Errorf("unsupported scan type for IndexJobsSource: %T", src)
+	}
+	return nil
+}
+
+type NullIndexJobsSource struct {
+	IndexJobsSource IndexJobsSource `json:"index_jobs_source"`
+	Valid           bool            `json:"valid"` // Valid is true if IndexJobsSource is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullIndexJobsSource) Scan(value interface{}) error {
+	if value == nil {
+		ns.IndexJobsSource, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.IndexJobsSource.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullIndexJobsSource) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.IndexJobsSource), nil
+}
+
+type RefreshTokensSubjectType string
+
+const (
+	RefreshTokensSubjectTypeTenantUser    RefreshTokensSubjectType = "tenant_user"
+	RefreshTokensSubjectTypePlatformAdmin RefreshTokensSubjectType = "platform_admin"
+)
+
+func (e *RefreshTokensSubjectType) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = RefreshTokensSubjectType(s)
+	case string:
+		*e = RefreshTokensSubjectType(s)
+	default:
+		return fmt.Errorf("unsupported scan type for RefreshTokensSubjectType: %T", src)
+	}
+	return nil
+}
+
+type NullRefreshTokensSubjectType struct {
+	RefreshTokensSubjectType RefreshTokensSubjectType `json:"refresh_tokens_subject_type"`
+	Valid                    bool                     `json:"valid"` // Valid is true if RefreshTokensSubjectType is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullRefreshTokensSubjectType) Scan(value interface{}) error {
+	if value == nil {
+		ns.RefreshTokensSubjectType, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.RefreshTokensSubjectType.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullRefreshTokensSubjectType) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.RefreshTokensSubjectType), nil
+}
+
+type SigningKeysStatus string
+
+const (
+	SigningKeysStatusActive  SigningKeysStatus = "active"
+	SigningKeysStatusRetired SigningKeysStatus = "retired"
+	SigningKeysStatusRevoked SigningKeysStatus = "revoked"
+)
+
+func (e *SigningKeysStatus) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = SigningKeysStatus(s)
+	case string:
+		*e = SigningKeysStatus(s)
+	default:
+		return fmt.Errorf("unsupported scan type for SigningKeysStatus: %T", src)
+	}
+	return nil
+}
+
+type NullSigningKeysStatus struct {
+	SigningKeysStatus SigningKeysStatus `json:"signing_keys_status"`
+	Valid             bool              `json:"valid"` // Valid is true if SigningKeysStatus is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullSigningKeysStatus) Scan(value interface{}) error {
+	if value == nil {
+		ns.SigningKeysStatus, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.SigningKeysStatus.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullSigningKeysStatus) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.SigningKeysStatus), nil
+}
+
 type TenantConfigVersionsState string
 
 const (
@@ -248,17 +375,29 @@ type AdCreative struct {
 	ProductID  string `json:"product_id"`
 }
 
+type EmailVerification struct {
+	TokenHash []byte       `json:"token_hash"`
+	UserID    string       `json:"user_id"`
+	ExpiresAt time.Time    `json:"expires_at"`
+	UsedAt    sql.NullTime `json:"used_at"`
+	CreatedAt time.Time    `json:"created_at"`
+}
+
 type IndexJob struct {
-	ID            string         `json:"id"`
-	TenantID      string         `json:"tenant_id"`
-	ConfigVersion int32          `json:"config_version"`
-	Status        string         `json:"status"`
-	Total         int32          `json:"total"`
-	Done          int32          `json:"done"`
-	Failed        int32          `json:"failed"`
-	StartedAt     sql.NullTime   `json:"started_at"`
-	FinishedAt    sql.NullTime   `json:"finished_at"`
-	Error         sql.NullString `json:"error"`
+	ID            string          `json:"id"`
+	TenantID      string          `json:"tenant_id"`
+	ConfigVersion int32           `json:"config_version"`
+	Status        string          `json:"status"`
+	Total         int32           `json:"total"`
+	Done          int32           `json:"done"`
+	Failed        int32           `json:"failed"`
+	StartedAt     sql.NullTime    `json:"started_at"`
+	FinishedAt    sql.NullTime    `json:"finished_at"`
+	Error         sql.NullString  `json:"error"`
+	Source        IndexJobsSource `json:"source"`
+	UploadKey     sql.NullString  `json:"upload_key"`
+	IndexVersion  sql.NullInt32   `json:"index_version"`
+	CreatedAt     time.Time       `json:"created_at"`
 }
 
 type OnboardingState struct {
@@ -281,6 +420,43 @@ type Plan struct {
 	MaxPageDepth    int32           `json:"max_page_depth"`
 	CreatedAt       time.Time       `json:"created_at"`
 	UpdatedAt       time.Time       `json:"updated_at"`
+}
+
+type PlatformAdmin struct {
+	ID           string    `json:"id"`
+	Email        string    `json:"email"`
+	PasswordHash string    `json:"password_hash"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type PlatformSetting struct {
+	Section   string          `json:"section"`
+	Document  json.RawMessage `json:"document"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	UpdatedBy sql.NullString  `json:"updated_by"`
+}
+
+type RefreshToken struct {
+	ID          string                   `json:"id"`
+	FamilyID    string                   `json:"family_id"`
+	SubjectType RefreshTokensSubjectType `json:"subject_type"`
+	SubjectID   string                   `json:"subject_id"`
+	TenantID    sql.NullString           `json:"tenant_id"`
+	TokenHash   []byte                   `json:"token_hash"`
+	ExpiresAt   time.Time                `json:"expires_at"`
+	RotatedAt   sql.NullTime             `json:"rotated_at"`
+	RevokedAt   sql.NullTime             `json:"revoked_at"`
+	CreatedAt   time.Time                `json:"created_at"`
+}
+
+type SigningKey struct {
+	Kid           string            `json:"kid"`
+	PublicKey     []byte            `json:"public_key"`
+	PrivateSealed []byte            `json:"private_sealed"`
+	Status        SigningKeysStatus `json:"status"`
+	CreatedAt     time.Time         `json:"created_at"`
+	RetiredAt     sql.NullTime      `json:"retired_at"`
+	PublishUntil  sql.NullTime      `json:"publish_until"`
 }
 
 type Tenant struct {

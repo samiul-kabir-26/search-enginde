@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 )
@@ -216,4 +217,68 @@ func (s *Store) CountActiveAPIKeys(ctx context.Context, id ID) (int, error) {
 		return 0, fmt.Errorf("count api keys: %w", err)
 	}
 	return int(n), nil
+}
+
+// ShadowConfig returns the tenant's shadow version, its sample rate and document, or
+// ErrNotFound.
+func (s *Store) ShadowConfig(ctx context.Context, id ID) (int, float64, *Config, error) {
+	row, err := s.q.GetShadowConfigVersion(ctx, string(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, nil, fmt.Errorf("shadow config for tenant %s: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("shadow config for tenant %s: %w", id, err)
+	}
+	cfg, err := ParseConfig(row.Document)
+	if err != nil {
+		return 0, 0, nil, fmt.Errorf("tenant %s config v%d: %w", id, row.Version, err)
+	}
+	rate, _ := strconv.ParseFloat(row.ShadowSampleRate.String, 64)
+	return int(row.Version), rate, cfg, nil
+}
+
+// ConfigVersion returns one published version's document.
+func (s *Store) ConfigVersion(ctx context.Context, id ID, v int) (*Config, error) {
+	row, err := s.q.GetConfigVersion(ctx, tenantdb.GetConfigVersionParams{TenantID: string(id), Version: int32(v)}) //nolint:gosec // versions are small
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("tenant %s config v%d: %w", id, v, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant %s config v%d: %w", id, v, err)
+	}
+	return ParseConfig(row.Document)
+}
+
+// Draft returns the tenant's current draft document.
+func (s *Store) Draft(ctx context.Context, id ID) (*Config, error) {
+	row, err := s.q.GetConfigDraft(ctx, string(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("tenant %s draft: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tenant %s draft: %w", id, err)
+	}
+	return ParseConfig(row.Document)
+}
+
+// LiveVersion is a tenant's active or shadow version.
+type LiveVersion struct {
+	Tenant  ID
+	Version int
+	Shadow  bool
+	Rate    float64
+}
+
+// LiveVersions lists every active and shadow version (the reconcile loop's source of truth).
+func (s *Store) LiveVersions(ctx context.Context) ([]LiveVersion, error) {
+	rows, err := s.q.ListLiveConfigVersions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("live config versions: %w", err)
+	}
+	out := make([]LiveVersion, len(rows))
+	for i, r := range rows {
+		rate, _ := strconv.ParseFloat(r.ShadowSampleRate.String, 64)
+		out[i] = LiveVersion{Tenant: ID(r.TenantID), Version: int(r.Version), Shadow: r.State == tenantdb.TenantConfigVersionsStateShadow, Rate: rate}
+	}
+	return out, nil
 }

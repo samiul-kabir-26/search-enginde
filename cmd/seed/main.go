@@ -34,6 +34,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/tenant"
+	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
 )
 
 const service = "seed"
@@ -48,20 +49,25 @@ type config struct {
 	S3SecretKey  string
 	S3Bucket     string
 	S3PublicURL  string
+	// AdminEmail and AdminPassword bootstrap the first platform admin (PLAN.md R7).
+	AdminEmail    string
+	AdminPassword string
 }
 
 func loadConfig() (config, error) {
 	env := platform.NewEnv()
 	c := config{
-		LogLevel:     env.String("LOG_LEVEL", "info"),
-		MySQLDSN:     env.Required("MYSQL_DSN"),
-		KafkaBrokers: strings.Split(env.Required("KAFKA_BROKERS"), ","),
-		S3Endpoint:   env.Required("S3_ENDPOINT"),
-		S3Region:     env.String("S3_REGION", "us-east-1"),
-		S3AccessKey:  env.Required("S3_ACCESS_KEY"),
-		S3SecretKey:  env.Required("S3_SECRET_KEY"),
-		S3Bucket:     env.Required("S3_BUCKET_IMAGES"),
-		S3PublicURL:  env.Required("S3_PUBLIC_URL"),
+		LogLevel:      env.String("LOG_LEVEL", "info"),
+		MySQLDSN:      env.Required("MYSQL_DSN"),
+		KafkaBrokers:  strings.Split(env.Required("KAFKA_BROKERS"), ","),
+		S3Endpoint:    env.Required("S3_ENDPOINT"),
+		S3Region:      env.String("S3_REGION", "us-east-1"),
+		S3AccessKey:   env.Required("S3_ACCESS_KEY"),
+		S3SecretKey:   env.Required("S3_SECRET_KEY"),
+		S3Bucket:      env.Required("S3_BUCKET_IMAGES"),
+		S3PublicURL:   env.Required("S3_PUBLIC_URL"),
+		AdminEmail:    env.String("PLATFORM_ADMIN_EMAIL", ""),
+		AdminPassword: env.String("PLATFORM_ADMIN_PASSWORD", ""),
 	}
 	return c, env.Err()
 }
@@ -108,6 +114,9 @@ func run(ctx context.Context, o options) error {
 		return fmt.Errorf("mysql: %w", err)
 	}
 	defer db.Close()
+	if err := ensurePlatformAdmin(ctx, db, cfg.AdminEmail, cfg.AdminPassword, log); err != nil {
+		return err
+	}
 	store := tenant.NewStore(db)
 	tid, err := ensureTenant(ctx, store, o.slug, log)
 	if err != nil {
@@ -192,6 +201,34 @@ func ensureTenant(ctx context.Context, store *tenant.Store, slug string, log *sl
 	}
 	log.Info("tenant created", "tenant", id, "slug", slug, "config_version", 1)
 	return id, nil
+}
+
+// ensurePlatformAdmin creates the first platform admin when none exists.
+func ensurePlatformAdmin(ctx context.Context, db *sql.DB, email, password string, log *slog.Logger) error {
+	q := tenantdb.New(db)
+	n, err := q.CountPlatformAdmins(ctx)
+	if err != nil {
+		return fmt.Errorf("count platform admins: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if email == "" || password == "" {
+		log.Warn("no platform admin exists; set PLATFORM_ADMIN_EMAIL and PLATFORM_ADMIN_PASSWORD and rerun make seed")
+		return nil
+	}
+	if err := auth.CheckPasswordPolicy(password, 12); err != nil {
+		return fmt.Errorf("PLATFORM_ADMIN_PASSWORD: %w", err)
+	}
+	hash, err := auth.HashPassword(password, auth.DefaultPasswordParams())
+	if err != nil {
+		return err
+	}
+	if err := q.CreatePlatformAdmin(ctx, tenantdb.CreatePlatformAdminParams{ID: tenant.NewID().String(), Email: strings.ToLower(email), PasswordHash: hash}); err != nil {
+		return fmt.Errorf("create platform admin: %w", err)
+	}
+	log.Info("platform admin created", "email", email)
+	return nil
 }
 
 // ensureAPIKey creates a demo API key with every data-plane scope when the tenant has none

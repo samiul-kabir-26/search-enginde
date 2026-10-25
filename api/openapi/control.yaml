@@ -8,6 +8,7 @@ servers:
 security:
 - bearer: []
 tags:
+- {name: admin}
 - {name: access}
 - {name: ads}
 - {name: auth}
@@ -38,7 +39,13 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/SessionResponse'}
-        4XX: {$ref: '#/components/responses/Problem'}
+          headers: &id001
+            Set-Cookie:
+              description: 'se_refresh: HttpOnly, SameSite=Strict, Path=/v1/; the rotating refresh token.'
+              schema: {type: string}
+        4XX: &id002 {$ref: '#/components/responses/Problem'}
+      description: Creates the tenant, its owner, the default draft config and onboarding state, and emails a verification
+        link. Idempotent with Idempotency-Key.
   /v1/auth/login:
     post:
       operationId: login
@@ -56,7 +63,8 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/SessionResponse'}
-        4XX: {$ref: '#/components/responses/Problem'}
+          headers: *id001
+        4XX: *id002
   /v1/auth/token:
     post:
       operationId: exchangeApiKey
@@ -75,6 +83,54 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/TokenResponse'}
         4XX: {$ref: '#/components/responses/Problem'}
+      description: The token's TTL is the platform setting auth.api_token_ttl.
+  /v1/auth/refresh:
+    post:
+      operationId: refreshSession
+      tags: [auth]
+      summary: Rotate the refresh cookie and issue a new access token
+      description: Reads the se_refresh cookie. Presenting a refresh token that was already rotated revokes its whole family
+        (reuse detection) and returns 401.
+      security: []
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionResponse'}
+          headers: *id001
+        4XX: *id002
+  /v1/auth/logout:
+    post:
+      operationId: logout
+      tags: [auth]
+      summary: Revoke the refresh token family and clear the cookie
+      security: []
+      responses:
+        '204': {description: No content}
+        4XX: *id002
+  /v1/auth/verify-email:
+    post:
+      operationId: verifyEmail
+      tags: [auth]
+      summary: Confirm an email address with the token from the verification link
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/VerifyEmailRequest'}
+      responses:
+        '204': {description: No content}
+        4XX: *id002
+  /v1/auth/resend-verification:
+    post:
+      operationId: resendVerification
+      tags: [auth]
+      summary: Email a fresh verification link to the calling user
+      responses:
+        '202': {description: Accepted}
+        4XX: *id002
   /.well-known/jwks.json:
     get:
       operationId: jwks
@@ -88,18 +144,181 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/JWKS'}
         4XX: {$ref: '#/components/responses/Problem'}
+  /v1/admin/login:
+    post:
+      operationId: adminLogin
+      tags: [admin]
+      summary: Platform admin login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AdminLoginRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/SessionResponse'}
+          headers: *id001
+        4XX: *id002
+  /v1/admin/settings:
+    get:
+      operationId: getPlatformSettings
+      tags: [admin]
+      summary: Read platform settings
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformSettings'}
+        4XX: *id002
+    put:
+      operationId: putPlatformSettings
+      tags: [admin]
+      summary: Replace platform settings (validated against bounds)
+      description: Every control-api replica reloads via Redis pub/sub (platform.settings.changed).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PlatformSettings'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlatformSettings'}
+        4XX: *id002
+  /v1/admin/plans:
+    get:
+      operationId: listPlans
+      tags: [admin]
+      summary: List plans
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Plan'}
+        4XX: *id002
+  /v1/admin/plans/{plan_id}:
+    put:
+      operationId: putPlan
+      tags: [admin]
+      summary: Create or replace a plan
+      parameters:
+      - name: plan_id
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Plan'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Plan'}
+        4XX: *id002
+  /v1/admin/keys:
+    get:
+      operationId: listSigningKeys
+      tags: [admin]
+      summary: List JWT signing keys
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/SigningKey'}
+        4XX: *id002
+  /v1/admin/keys/rotate:
+    post:
+      operationId: rotateSigningKey
+      tags: [admin]
+      summary: Rotate the signing key now
+      description: The old key keeps verifying (published in the JWKS) until the retention window ends.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [active_kid]
+                properties:
+                  active_kid: {type: string}
+        4XX: *id002
+  /v1/admin/keys/{kid}/revoke:
+    post:
+      operationId: revokeSigningKey
+      tags: [admin]
+      summary: Revoke a signing key immediately
+      description: Tokens signed by the key stop verifying at once; revoking the active key rotates first.
+      parameters:
+      - name: kid
+        in: path
+        required: true
+        schema: {type: string}
+      responses:
+        '204': {description: No content}
+        4XX: *id002
+  /v1/admin/tenants:
+    get:
+      operationId: listTenants
+      tags: [admin]
+      summary: List tenants
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema: {type: integer, minimum: 1, maximum: 200, default: 50}
+      - name: offset
+        in: query
+        required: false
+        schema: {type: integer, minimum: 0, default: 0}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/Tenant'}
+        4XX: *id002
   /v1/tenants/{tid}/api-keys:
     get:
       operationId: listApiKeys
       tags: [access]
       summary: List API keys
       parameters:
-      - name: tid
+      - &id003
+        name: tid
         in: path
         required: true
         schema: {type: string}
-      - {$ref: '#/components/parameters/Cursor'}
-      - {$ref: '#/components/parameters/Limit'}
       responses:
         '200':
           description: OK
@@ -112,9 +331,7 @@ paths:
                   items:
                     type: array
                     items: {$ref: '#/components/schemas/ApiKey'}
-                  next_cursor:
-                    type: [string, 'null']
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
     post:
       operationId: createApiKey
       tags: [access]
@@ -126,7 +343,7 @@ paths:
         schema: {type: string}
       - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema: {$ref: '#/components/schemas/ApiKeyCreate'}
@@ -160,12 +377,7 @@ paths:
       tags: [access]
       summary: List users
       parameters:
-      - name: tid
-        in: path
-        required: true
-        schema: {type: string}
-      - {$ref: '#/components/parameters/Cursor'}
-      - {$ref: '#/components/parameters/Limit'}
+      - *id003
       responses:
         '200':
           description: OK
@@ -178,13 +390,11 @@ paths:
                   items:
                     type: array
                     items: {$ref: '#/components/schemas/User'}
-                  next_cursor:
-                    type: [string, 'null']
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
     post:
       operationId: createUser
       tags: [access]
-      summary: Invite a user
+      summary: Add a user with an initial password (requires tenant:admin)
       parameters:
       - name: tid
         in: path
@@ -202,28 +412,8 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/User'}
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
   /v1/tenants/{tid}/users/{user_id}:
-    get:
-      operationId: getUser
-      tags: [access]
-      summary: Get a user
-      parameters:
-      - name: tid
-        in: path
-        required: true
-        schema: {type: string}
-      - name: user_id
-        in: path
-        required: true
-        schema: {type: string}
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/User'}
-        4XX: {$ref: '#/components/responses/Problem'}
     patch:
       operationId: updateUser
       tags: [access]
@@ -296,8 +486,13 @@ paths:
         in: path
         required: true
         schema: {$ref: '#/components/schemas/OnboardingStep'}
+      - name: use_defaults
+        in: query
+        required: false
+        schema: {type: boolean}
+        description: Apply platform defaults to the retrieval through personalization steps and mark them complete.
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema: {$ref: '#/components/schemas/StepPayload'}
@@ -308,6 +503,8 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/StepResult'}
         4XX: {$ref: '#/components/responses/Problem'}
+      description: Steps unlock in order; a completed step can be revisited. Invalid payloads return 422 with field errors
+        and change nothing.
   /v1/onboarding/engine-explainer:
     get:
       operationId: getEngineExplainer
@@ -353,8 +550,8 @@ paths:
           description: OK
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/ConfigDocument'}
-        4XX: {$ref: '#/components/responses/Problem'}
+              schema: {$ref: '#/components/schemas/DraftView'}
+        4XX: *id002
     put:
       operationId: putConfigDraft
       tags: [config]
@@ -374,8 +571,9 @@ paths:
           description: OK
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/ConfigDocument'}
-        4XX: {$ref: '#/components/responses/Problem'}
+              schema: {$ref: '#/components/schemas/DraftView'}
+        4XX: *id002
+      description: Saves the document even when it is invalid; the response carries the validation.
   /v1/tenants/{tid}/config/draft/validate:
     post:
       operationId: validateConfigDraft
@@ -397,7 +595,7 @@ paths:
     post:
       operationId: publishConfig
       tags: [config]
-      summary: Publish the draft as a new immutable version
+      summary: Publish the draft as the next immutable version
       parameters:
       - name: tid
         in: path
@@ -409,19 +607,14 @@ paths:
           description: OK
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/ConfigVersion'}
-        4XX: {$ref: '#/components/responses/Problem'}
+              schema: {$ref: '#/components/schemas/ConfigVersionSummary'}
+        4XX: *id002
     get:
       operationId: listConfigVersions
       tags: [config]
       summary: List config versions
       parameters:
-      - name: tid
-        in: path
-        required: true
-        schema: {type: string}
-      - {$ref: '#/components/parameters/Cursor'}
-      - {$ref: '#/components/parameters/Limit'}
+      - *id003
       responses:
         '200':
           description: OK
@@ -434,9 +627,7 @@ paths:
                   items:
                     type: array
                     items: {$ref: '#/components/schemas/ConfigVersionSummary'}
-                  next_cursor:
-                    type: [string, 'null']
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
   /v1/tenants/{tid}/config/versions/{v}:
     get:
       operationId: getConfigVersion
@@ -478,7 +669,9 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ConfigVersionSummary'}
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
+      description: Requires a verified email. The previous active version is retired and search-api switches within seconds
+        (Redis pub/sub, with a 30 s reconcile as the fallback).
   /v1/tenants/{tid}/config/versions/{v}/shadow:
     post:
       operationId: shadowConfigVersion
@@ -504,7 +697,8 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ConfigVersionSummary'}
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
+      description: sample_rate 0 clears shadow mode.
   /v1/tenants/{tid}/config/diff:
     get:
       operationId: diffConfigVersions
@@ -788,12 +982,31 @@ paths:
           application/json:
             schema: {$ref: '#/components/schemas/IndexJobCreate'}
       responses:
-        '201':
-          description: OK
+        '202':
+          description: Accepted
           content:
             application/json:
               schema: {$ref: '#/components/schemas/IndexJob'}
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
+    get:
+      operationId: listIndexJobs
+      tags: [indexing]
+      summary: List recent index jobs
+      parameters:
+      - *id003
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: {$ref: '#/components/schemas/IndexJob'}
+        4XX: *id002
   /v1/tenants/{tid}/index/jobs/{job_id}:
     get:
       operationId: getIndexJob
@@ -819,14 +1032,14 @@ paths:
     post:
       operationId: createCatalogUpload
       tags: [indexing]
-      summary: Presigned upload for JSONL/CSV batch ingestion
+      summary: Presign a catalog upload (JSONL, one tenant product per line)
       parameters:
       - name: tid
         in: path
         required: true
         schema: {type: string}
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema: {$ref: '#/components/schemas/UploadRequest'}
@@ -836,7 +1049,7 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/PresignedUpload'}
-        4XX: {$ref: '#/components/responses/Problem'}
+        4XX: *id002
   /v1/tenants/{tid}/catalog/mapping/preview:
     post:
       operationId: previewCatalogMapping
@@ -1077,7 +1290,7 @@ paths:
     post:
       operationId: playgroundSearch
       tags: [playground]
-      summary: Run search against the draft or a version with explain=true
+      summary: Search the draft or a version with explain forced on
       parameters:
       - name: tid
         in: path
@@ -1095,6 +1308,7 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/PlaygroundResponse'}
         4XX: {$ref: '#/components/responses/Problem'}
+      description: Proxies to search-api with a one-minute search:playground token; config_version is sent as X-Config-Version.
   /healthz:
     get:
       operationId: healthz
@@ -1124,6 +1338,31 @@ paths:
           content:
             text/plain:
               schema: {type: string}
+  /v1/tenants/{tid}/playground/search/image:
+    post:
+      operationId: playgroundImageSearch
+      tags: [playground]
+      summary: Image search against the draft or a version with explain forced on
+      parameters:
+      - *id003
+      - name: config_version
+        in: query
+        required: false
+        schema: {type: string, default: draft}
+        description: A version number or draft.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema: {type: object, additionalProperties: true, description: 'The search-api image search multipart form (search.yaml,
+                POST /v1/search/image).'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PlaygroundResponse'}
+        4XX: *id002
 components:
   securitySchemes:
     bearer: {type: http, scheme: bearer, bearerFormat: JWT (EdDSA)}
@@ -1178,23 +1417,24 @@ components:
         region: {type: string}
         plan: {type: string}
         email: {type: string, format: email}
-        password: {type: string, minLength: 12}
+        password: {type: string, minLength: 12, description: At least auth.password_min_length characters (default 12).}
       required: [company_name, slug, region, plan, email, password]
     LoginRequest:
       type: object
       properties:
-        tenant_slug: {type: string}
+        tenant: {type: string, description: Tenant slug}
         email: {type: string, format: email}
         password: {type: string}
-      required: [email, password]
+      required: [tenant, email, password]
     SessionResponse:
       type: object
       properties:
-        token: {type: string}
-        tenant_id: {type: string}
-        user_id: {type: string}
-        expires_at: {type: string, format: date-time}
-      required: [token, tenant_id, expires_at]
+        access_token: {type: string}
+        token_type: {type: string, const: Bearer}
+        expires_in: {type: integer, description: Seconds}
+        tenant_id: {type: string, description: Absent for platform admins}
+        user: {$ref: '#/components/schemas/User'}
+      required: [access_token, token_type, expires_in]
     TokenRequest:
       type: object
       properties:
@@ -1220,35 +1460,28 @@ components:
     ApiKeyCreate:
       type: object
       properties:
-        name: {type: string}
         scopes:
           type: array
           items: {$ref: '#/components/schemas/Scope'}
-      required: [name, scopes]
+          default: ['search:read', 'events:write']
     ApiKey:
       type: object
       properties:
         id: {type: string}
-        name: {type: string}
         prefix: {type: string}
         scopes:
           type: array
           items: {$ref: '#/components/schemas/Scope'}
-        created_at: {type: string, format: date-time}
-        last_used_at:
-          type: [string, 'null']
-          format: date-time
-        revoked_at:
-          type: [string, 'null']
-          format: date-time
+        created_at: &id004 {type: string, format: date-time}
+        last_used_at: *id004
+        revoked_at: *id004
       required: [id, prefix, scopes, created_at]
     ApiKeyCreated:
-      allOf:
-      - {$ref: '#/components/schemas/ApiKey'}
-      - type: object
-        properties:
-          secret: {type: string, description: Shown once.}
-        required: [secret]
+      type: object
+      properties:
+        api_key: {type: string, description: The secret; shown once.}
+        key: {$ref: '#/components/schemas/ApiKey'}
+      required: [api_key, key]
     Role:
       type: string
       enum: [owner, admin, developer, viewer]
@@ -1258,14 +1491,16 @@ components:
         id: {type: string}
         email: {type: string, format: email}
         role: {$ref: '#/components/schemas/Role'}
-        created_at: {type: string, format: date-time}
-      required: [id, email, role]
+        email_verified: {type: boolean}
+        created_at: *id004
+      required: [id, email, role, email_verified, created_at]
     UserCreate:
       type: object
       properties:
         email: {type: string, format: email}
         role: {$ref: '#/components/schemas/Role'}
-      required: [email, role]
+        password: {type: string, description: Initial password; the policy applies.}
+      required: [email, role, password]
     UserUpdate:
       type: object
       properties:
@@ -1277,28 +1512,39 @@ components:
     OnboardingState:
       type: object
       properties:
-        current_step: {$ref: '#/components/schemas/OnboardingStep'}
+        current_step: {type: string, description: 'An OnboardingStep, or done'}
         completed_steps:
           type: array
           items: {$ref: '#/components/schemas/OnboardingStep'}
-        blockers:
+        steps:
           type: array
-          items: {$ref: '#/components/schemas/FieldError'}
-      required: [current_step, completed_steps]
-    StepPayload: {type: object, description: Step-specific payload (docs/ONBOARDING.md §4). Skeleton; the full schema is defined
-        in the milestone that implements this endpoint., additionalProperties: true}
+          items: {$ref: '#/components/schemas/OnboardingStep'}
+          description: All steps in order
+      required: [current_step, completed_steps, steps]
+    StepPayload:
+      description: The schema for the step in the path (bodies of different steps can overlap); engine_tour and playground
+        take an empty object.
+      anyOf:
+      - {$ref: '#/components/schemas/CatalogStep'}
+      - {$ref: '#/components/schemas/RetrievalStep'}
+      - {$ref: '#/components/schemas/PoliciesStep'}
+      - {$ref: '#/components/schemas/RankingStep'}
+      - {$ref: '#/components/schemas/PersonalizationStep'}
+      - {$ref: '#/components/schemas/IndexBuildStep'}
+      - {$ref: '#/components/schemas/GoLiveStep'}
+      - {type: object, maxProperties: 0}
     StepResult:
       type: object
       properties:
-        valid: {type: boolean}
-        errors:
+        step: {$ref: '#/components/schemas/OnboardingStep'}
+        next_step: {type: string, description: 'An OnboardingStep, or done'}
+        warnings: &id005
           type: array
           items: {$ref: '#/components/schemas/FieldError'}
-        warnings:
-          type: array
-          items: {$ref: '#/components/schemas/FieldError'}
-        next_step: {$ref: '#/components/schemas/OnboardingStep'}
-      required: [valid]
+        data: {type: object, additionalProperties: true, description: 'index_build: {version, job}; go_live: {version, state,
+            api_key?, key?} (the key is created once)'}
+        state: {$ref: '#/components/schemas/OnboardingState'}
+      required: [step, next_step, warnings, state]
     EngineExplainer:
       type: object
       properties:
@@ -1308,17 +1554,21 @@ components:
             type: object
             properties:
               id: {type: string}
+              number: {type: integer}
               title: {type: string}
-              description: {type: string}
+              summary: {type: string}
               configurable:
                 type: array
                 items: {type: string}
               default: {type: string}
-              current:
+              injection: {type: string, description: Where a custom model or store plugs in}
+              step: {$ref: '#/components/schemas/OnboardingStep'}
+              badge:
                 type: string
-                enum: [default, custom]
-              wizard_step: {$ref: '#/components/schemas/OnboardingStep'}
-            required: [id, title, description]
+                enum: [Default, Custom]
+                description: Tenant view only
+              choice: {type: string, description: 'Tenant view only: the current choice'}
+            required: [id, number, title, summary, configurable, default, injection, step]
       required: [stages]
     ConfigDocument:
       type: object
@@ -1344,7 +1594,8 @@ components:
       properties:
         version: {type: integer}
         state: {$ref: '#/components/schemas/ConfigVersionState'}
-        created_at: {type: string, format: date-time}
+        shadow_sample_rate: {type: number, minimum: 0, maximum: 0.2}
+        created_at: *id004
         created_by: {type: string}
       required: [version, state, created_at]
     ConfigVersion:
@@ -1357,7 +1608,7 @@ components:
     ShadowRequest:
       type: object
       properties:
-        sample_rate: {type: number, minimum: 0, maximum: 0.2}
+        sample_rate: {type: number, minimum: 0, maximum: 0.2, description: 0 clears shadow mode}
       required: [sample_rate]
     ConfigDiff:
       type: object
@@ -1372,9 +1623,9 @@ components:
               op:
                 type: string
                 enum: [add, remove, replace]
-              path: {type: string}
-              old: {}
-              new: {}
+              path: {type: string, description: JSON Pointer}
+              from: {}
+              to: {}
             required: [op, path]
       required: [from, to, changes]
     SecretCreate:
@@ -1486,61 +1737,75 @@ components:
     UploadRequest:
       type: object
       properties:
-        filename: {type: string}
-        size_bytes: {type: integer}
-        content_type: {type: string}
-      required: [filename, size_bytes]
+        format:
+          type: string
+          enum: [jsonl]
+          default: jsonl
     PresignedUpload:
       type: object
       properties:
-        url: {type: string}
+        upload_id: {type: string, description: Pass to POST .../index/jobs}
         method: {type: string, const: PUT}
+        url: {type: string}
         headers:
           type: object
           additionalProperties: {type: string}
-        expires_at: {type: string, format: date-time}
-        object_uri: {type: string}
-      required: [url, method, expires_at, object_uri]
+        expires_at: *id004
+      required: [upload_id, method, url, headers, expires_at]
     IndexJobCreate:
       type: object
       properties:
         config_version: {type: integer}
+        upload_id: {type: string, description: Index this upload; without it the job backfills from the catalog topic}
       required: [config_version]
     IndexJob:
       type: object
       properties:
         id: {type: string}
         config_version: {type: integer}
-        status: {type: string}
+        source:
+          type: string
+          enum: [topic, upload]
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed]
         total: {type: integer}
         done: {type: integer}
         failed: {type: integer}
-        started_at:
-          type: [string, 'null']
-          format: date-time
-        finished_at:
-          type: [string, 'null']
-          format: date-time
-        error:
-          type: [string, 'null']
-      required: [id, config_version, status, total, done, failed]
+        index_version: {type: integer}
+        error: {type: string}
+        created_at: *id004
+        started_at: *id004
+        finished_at: *id004
+      required: [id, config_version, source, status, total, done, failed, created_at]
     MappingPreviewRequest:
       type: object
       properties:
-        sample: {type: object, additionalProperties: true}
-        field_mapping:
+        field_mapping: &id006
           type: object
           additionalProperties: {type: string, description: JSONPath}
-      required: [sample, field_mapping]
+          description: Platform field name to JSONPath in the tenant document
+        custom_fields:
+          type: array
+          items: {$ref: '#/components/schemas/CustomField'}
+        samples:
+          type: array
+          items: &id007 {type: object, additionalProperties: true}
+          minItems: 1
+          maxItems: 20
+      required: [field_mapping, samples]
     MappingPreviewResponse:
       type: object
       properties:
-        valid: {type: boolean}
-        product: {type: object, additionalProperties: true}
-        errors:
+        results:
           type: array
-          items: {$ref: '#/components/schemas/FieldError'}
-      required: [valid]
+          items:
+            type: object
+            properties:
+              product: {type: object, additionalProperties: true, description: The normalized platform product}
+              errors: *id005
+            required: [product]
+      required: [results]
     CampaignInput:
       type: object
       properties:
@@ -1592,15 +1857,184 @@ components:
       required: [rows]
     PlaygroundRequest:
       type: object
+      additionalProperties: true
+      description: A search-api SearchRequest (search.yaml) plus config_version.
       properties:
-        query_type:
-          type: string
-          enum: [text, image, similar]
-        target: {type: string, description: draft or a version number}
+        config_version:
+          oneOf:
+          - {type: integer, minimum: 1}
+          - {type: string, const: draft}
+          default: draft
         q: {type: string}
-        image_base64: {type: string}
-        product_id: {type: string}
-        filters: {type: object, additionalProperties: true}
-      required: [query_type]
-    PlaygroundResponse: {type: object, description: search-api SearchResponse with the explain trace. Skeleton; the full schema
-        is defined in the milestone that implements this endpoint., additionalProperties: true}
+    PlaygroundResponse: {type: object, additionalProperties: true, description: 'The search-api SearchResponse (search.yaml),
+        always with the explain trace.'}
+    AdminLoginRequest:
+      type: object
+      properties:
+        email: {type: string, format: email}
+        password: {type: string}
+      required: [email, password]
+    VerifyEmailRequest:
+      type: object
+      properties:
+        token: {type: string}
+      required: [token]
+    CustomField:
+      type: object
+      properties:
+        name: {type: string}
+        type:
+          type: string
+          enum: [keyword, 'keyword[]', text, int, float, bool, date, object]
+        source: {type: string, description: JSONPath}
+        filterable: {type: boolean}
+        facetable: {type: boolean}
+        searchable: {type: boolean}
+        sortable: {type: boolean}
+        required: {type: boolean}
+      required: [name, type, source]
+    CatalogStep:
+      type: object
+      properties:
+        ingestion:
+          type: string
+          enum: [events, upload]
+        field_mapping: *id006
+        custom_fields:
+          type: array
+          items: {$ref: '#/components/schemas/CustomField'}
+        samples:
+          type: array
+          items: *id007
+          maxItems: 20
+      required: [ingestion, field_mapping]
+      additionalProperties: false
+    RetrievalStep:
+      type: object
+      properties:
+        preset:
+          type: string
+          enum: [balanced, keyword, semantic, visual]
+          default: balanced
+        embedders: {type: object, additionalProperties: true, description: ConfigDocument embedders (platform only until M5)}
+        stores: {type: object, additionalProperties: true, description: ConfigDocument stores (platform only until M5)}
+      additionalProperties: false
+    PoliciesStep:
+      type: object
+      properties:
+        in_stock: {type: boolean}
+        ship_to_region: {type: string}
+        verified_vendors: {type: boolean}
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              kind: {type: string}
+              expr: {type: string}
+            required: [id, kind, expr]
+      additionalProperties: false
+    RankingStep:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [default, learned, byo]
+          default: default
+          description: learned and byo return not_available until M7
+        weights:
+          type: object
+          additionalProperties: {type: number}
+      additionalProperties: false
+    PersonalizationStep:
+      type: object
+      properties:
+        personalization: *id007
+        diversity: *id007
+        ads: *id007
+      additionalProperties: false
+    IndexBuildStep:
+      type: object
+      properties:
+        upload_id: {type: string, description: Backfill from an upload instead of the catalog topic}
+      additionalProperties: false
+    GoLiveStep:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [activate]
+          default: activate
+        version: {type: integer, description: Defaults to the latest published version}
+      additionalProperties: false
+    DraftView:
+      type: object
+      properties:
+        document: {$ref: '#/components/schemas/ConfigDocument'}
+        schema_version: {type: integer}
+        updated_at: *id004
+        validation: {$ref: '#/components/schemas/ValidationResult'}
+      required: [document, schema_version, updated_at]
+    PlatformSettings:
+      type: object
+      properties:
+        auth:
+          type: object
+          properties:
+            password:
+              type: object
+              properties:
+                memory_kib: {type: integer, minimum: 19456, maximum: 262144}
+                time: {type: integer, minimum: 1}
+                threads: {type: integer, minimum: 1}
+              required: [memory_kib, time, threads]
+            password_min_length: {type: integer, minimum: 8, maximum: 64}
+            access_token_ttl: {type: string, description: 5m to 60m}
+            refresh_token_ttl: {type: string, description: 24h to 720h}
+            api_token_ttl: {type: string, description: 5m to 60m}
+            key_rotation: {type: string, description: 7 to 90 days}
+            key_retention: {type: string, description: 1 to 30 days and at least every token TTL}
+            email_verification_ttl: {type: string, description: 1h to 7 days}
+          required: [password, password_min_length, access_token_ttl, refresh_token_ttl, api_token_ttl, key_rotation, key_retention,
+            email_verification_ttl]
+      required: [auth]
+    Plan:
+      type: object
+      properties:
+        id: {type: string, readOnly: true}
+        name: {type: string}
+        max_total_ms: {type: integer}
+        search_rps: {type: integer}
+        search_burst: {type: integer}
+        events_rps: {type: integer}
+        byo_allowed: {type: boolean}
+        egress_allowlist:
+          type: array
+          items: {type: string}
+        max_custom_fields: {type: integer}
+        max_page_depth: {type: integer}
+      required: [name, max_total_ms, search_rps, search_burst, events_rps, byo_allowed, max_custom_fields, max_page_depth]
+    SigningKey:
+      type: object
+      properties:
+        kid: {type: string}
+        status:
+          type: string
+          enum: [active, retired, revoked]
+        created_at: *id004
+        retired_at: *id004
+        publish_until: *id004
+      required: [kid, status, created_at]
+    Tenant:
+      type: object
+      properties:
+        id: {type: string}
+        slug: {type: string}
+        name: {type: string}
+        plan: {type: string}
+        region: {type: string}
+        status: {type: string}
+        created_at: *id004
+        updated_at: *id004
+      required: [id, slug, name, plan, region, status, created_at, updated_at]

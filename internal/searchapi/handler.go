@@ -36,10 +36,16 @@ const (
 	MaxPageSize     = 100
 )
 
-// Resolver returns a tenant's resolved config.
+// Resolver returns a tenant's resolved config: the active one, or a pinned version or the
+// draft for playground requests.
 type Resolver interface {
 	Get(ctx context.Context, id tenant.ID) (*tenant.Resolved, error)
+	Pinned(ctx context.Context, id tenant.ID, ref string) (*tenant.Resolved, error)
 }
+
+// HeaderConfigVersion pins a playground request to a config version or "draft"; it is honoured
+// only for tokens with search:playground (minted by control-api's playground proxy).
+const HeaderConfigVersion = "X-Config-Version"
 
 // ProviderSource returns a tenant's providers for its config version.
 type ProviderSource interface {
@@ -64,7 +70,9 @@ type Service struct {
 	Snapshots *Snapshots
 	Cursors   *Cursors
 	Limiter   RateLimiter
-	Log       *slog.Logger
+	// Shadow runs sampled requests on the tenant's shadow version (nil disables).
+	Shadow *Shadow
+	Log    *slog.Logger
 }
 
 // Routes registers the search routes behind bearer auth.
@@ -201,7 +209,7 @@ func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {
 		badRequest(w, errs...)
 		return
 	}
-	res, ok := s.resolve(ctx, w, p)
+	res, ok := s.resolve(ctx, w, r, p)
 	if !ok {
 		return
 	}
@@ -220,10 +228,24 @@ func (s *Service) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// resolve loads the caller's tenant and applies its rate limit, writing the error response
-// when either fails.
-func (s *Service) resolve(ctx context.Context, w http.ResponseWriter, p auth.Principal) (*tenant.Resolved, bool) {
-	res, err := s.Resolver.Get(ctx, p.Tenant)
+// resolve loads the caller's tenant config (the active one, or the pinned playground version)
+// and applies its rate limit, writing the error response when either fails.
+func (s *Service) resolve(ctx context.Context, w http.ResponseWriter, r *http.Request, p auth.Principal) (*tenant.Resolved, bool) {
+	var res *tenant.Resolved
+	var err error
+	if ref := r.Header.Get(HeaderConfigVersion); ref != "" {
+		if !p.Has(auth.ScopeSearchPlayground) {
+			platform.WriteProblem(w, platform.Problem{Status: http.StatusForbidden, Detail: HeaderConfigVersion + " is for the playground only"})
+			return nil, false
+		}
+		res, err = s.Resolver.Pinned(ctx, p.Tenant, ref)
+		if errors.Is(err, tenant.ErrNotFound) {
+			platform.WriteProblem(w, platform.Problem{Status: http.StatusNotFound, Detail: "no such config version"})
+			return nil, false
+		}
+	} else {
+		res, err = s.Resolver.Get(ctx, p.Tenant)
+	}
 	if errors.Is(err, tenant.ErrNotFound) {
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusForbidden, Detail: "the tenant is unknown or inactive"})
 		return nil, false
@@ -252,8 +274,10 @@ func compileFilter(w http.ResponseWriter, f *filter.Expr, res *tenant.Resolved) 
 // snapshot is missing. keyParts identify the query (everything that changes the order).
 func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.Principal, res *tenant.Resolved,
 	q *pipeline.Query, page PageRequest, explainRequested bool, keyParts ...any) (*SearchResponse, bool) {
-	explain := explainRequested && p.Has(auth.ScopeSearchDebug)
+	playground := p.Has(auth.ScopeSearchPlayground)
+	explain := playground || (explainRequested && p.Has(auth.ScopeSearchDebug))
 	tid := string(p.Tenant)
+	requestID := ulid.Make().String()
 	key, err := SnapshotKey(append([]any{res.ConfigVersion}, keyParts...)...)
 	if err != nil {
 		s.fail(w, err)
@@ -292,17 +316,26 @@ func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.
 			return nil, false
 		}
 		q.Depth, q.Explain = max(res.Plan.MaxPageDepth, page.Size), explain
+		shadowQ := *q
+		start := time.Now()
 		var st *pipeline.State
 		st, tr = s.Engine.Run(ctx, res, providers, q)
 		snap = snapshotOf(res.ConfigVersion, st)
-		if err := s.Snapshots.Put(ctx, tid, key, snap); err != nil {
-			s.Log.Warn("snapshot write failed", "tenant", tid, "err", err)
+		if !playground {
+			if err := s.Snapshots.Put(ctx, tid, key, snap); err != nil {
+				s.Log.Warn("snapshot write failed", "tenant", tid, "err", err)
+			}
+			s.Shadow.Maybe(res, shadowQ, st.Candidates, time.Since(start), requestID) //nolint:contextcheck // shadow runs detached from the request by design
 		}
 	}
 	resp, err := s.page(ctx, res, snap, key, offset, page.Size)
 	if err != nil {
 		s.fail(w, err)
 		return nil, false
+	}
+	resp.RequestID = requestID
+	if playground {
+		resp.NextCursor = nil
 	}
 	if explain {
 		resp.Trace = tr

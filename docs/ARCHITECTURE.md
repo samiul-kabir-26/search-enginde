@@ -5,12 +5,12 @@
 | Binary | Plane | Responsibility |
 |---|---|---|
 | `search-api` | Data | Stateless. Resolves tenant config, executes the pipeline, ingests events. Horizontally scaled. |
-| `control-api` | Control | Tenant sign-up, config drafts and versions, model registration, connection tests, index jobs, onboarding state, ads campaigns. Issues JWTs and serves JWKS. |
-| `indexer` | Data | Consumes `catalog.product.v1`, maps products to the canonical schema, embeds them via the tenant's embedder, upserts to the lexical and vector stores. Also runs backfill jobs. |
+| `control-api` | Control | Tenant sign-up, users and API keys, config drafts and versions, onboarding state, catalog uploads and index jobs, the playground proxy, model registration and connection tests (M5), ads campaigns (M8), and the platform admin API. Issues JWTs from a MySQL key ring and serves the JWKS. |
+| `indexer` | Data | Consumes `catalog.product.v1`, maps products to the canonical schema, embeds them via the tenant's embedder, upserts to the lexical and vector stores. Also runs index jobs queued by control-api: it claims them with `FOR UPDATE SKIP LOCKED`, publishes uploads as catalog events, and backfills a new index version. |
 | `featurejob` | Data | Aggregates ClickHouse events into Redis online features on a schedule. |
 | `seed` | Dev | Publishes the prepared dataset as catalog events and creates the `demo` tenant. |
 
-Infrastructure: MySQL (control plane), Redis (config invalidation, features, rate limits, ad pacing), OpenSearch, Qdrant, Kafka/Redpanda, ClickHouse, Triton, S3 object storage (SeaweedFS in dev).
+Infrastructure: MySQL (control plane), Redis (config invalidation, settings changes, idempotency keys, result snapshots, features, rate limits, ad pacing), Mailpit (dev SMTP), OpenSearch, Qdrant, Kafka/Redpanda, ClickHouse, Triton, S3 object storage (SeaweedFS in dev).
 
 ## 2. Request flow (`search-api`)
 
@@ -90,9 +90,12 @@ As implemented:
 ## 4. Registry
 
 - `registry.Registry` maps `(kind, type)` to a `Factory`, for example `("vector_store", "qdrant")` or `("scorer", "onnx")`.
-- A factory receives the stage's validated config block plus a `Deps` struct (EgressClient, SecretStore, Meter, Logger) and returns the provider.
-- Built providers are cached per `(tenant_id, config_version, stage)` in an LRU and closed on eviction or when the version is superseded.
-- Platform defaults are registered under the `platform` provider type and point at shared infrastructure, using a tenant-scoped collection or index.
+- A factory receives a `Spec` (the role's validated config block, the resolved tenant version, and the embedder dimensions that stores size their vectors from) plus a `Deps` struct. Today `Deps` holds the platform clients (Triton, OpenSearch, Qdrant, the centroid store) and the logger. M5 adds the EgressClient, SecretStore and Meter for BYO providers.
+- Built providers are cached per `(tenant_id, config_version, role)` in an LRU (roles: text/image embedders, lexical, vector store, centroids, pre-rank and rank scorers; the playground draft gets its own entries).
+- A provider leaves the cache when it is evicted, or when activation supersedes its version (`Supersede` keeps the active and shadow versions). It is closed only after a drain grace (30 s), so requests already running on it finish. A version that comes back (rollback) is rebuilt.
+- After an activation, search-api builds the new version's providers right away, so the first query does not pay for it.
+- Time-sensitive entries (category centroids, which follow the live index version) are rebuilt after `Refresh` (2 min).
+- Platform defaults are registered under the `platform` provider type and point at shared infrastructure, using a tenant-scoped collection or index. An unregistered `(kind, type)` fails the request with a clear error until its milestone registers it.
 
 ## 5. Pipeline engine
 
@@ -172,10 +175,18 @@ Each retriever gets `k` from config (default 500, max 2000).
 
 ## 8. Config propagation
 
-1. `control-api` writes an immutable version row, marks it active, and publishes `tenant.config.activated` on Redis pub/sub.
-2. `search-api` instances invalidate their cache and lazily reload from MySQL.
-3. A reconcile loop runs every 30 s and compares active versions, because pub/sub is lossy.
-4. Provider instances for the old version drain: in-flight requests finish, then the providers close.
+1. `control-api` writes an immutable version row. On activation, one transaction retires the previous active version and marks the new one active. It then publishes `tenant.config.activated` on Redis pub/sub as `{tenant_id, version, state}`, where `state` is `active`, `shadow` or `shadow_cleared`.
+2. `search-api` instances drop that tenant's resolver entry, and the next request reloads it from MySQL. The e2e test measures 5 ms from the activate call to the first request served by the new version.
+3. A reconcile loop runs every 30 s. It compares the cached active and shadow versions with MySQL (`ListLiveConfigVersions`), because pub/sub is lossy. The resolver TTL (`TENANT_CONFIG_TTL`, 10 min) is only a last backstop.
+4. The registry supersedes the old version's providers, which drain (§4).
+
+**Shadow mode** (R8).
+- A tenant can run one published version as a shadow on 0–20% of its traffic.
+- A sampled request is copied before the primary run. After the response is written, the copy runs on the shadow version on a bounded worker pool (`SHADOW_WORKERS`, default 8); when the pool is full, the comparison is dropped.
+- Only fresh pipeline runs are sampled, not snapshot hits or playground calls.
+- The results are never returned. Each comparison (top 10 IDs of both sides, overlap@10, both latencies, a degraded flag) is batched into ClickHouse `shadow_results` (90-day TTL).
+
+**Playground.** control-api proxies playground searches to search-api with a one-minute token carrying `search:playground`. With that scope, search-api resolves the version named in `X-Config-Version` (`Resolver.Pinned`: immutable versions are cached, drafts are always reloaded), forces the explain trace, and skips snapshots and shadow sampling.
 
 ## 9. Security
 

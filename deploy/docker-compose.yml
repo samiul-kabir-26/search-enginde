@@ -135,6 +135,15 @@ services:
       <<: *healthcheck
       test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8333/healthz"]
 
+  mailpit:
+    image: axllent/mailpit:v1.31.6
+    ports:
+      - "${MAILPIT_SMTP_HOST_PORT}:1025"
+      - "${MAILPIT_UI_HOST_PORT}:8025"
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "/mailpit", "readyz"]
+
   s3-init:
     profiles: [init]
     image: chrislusf/seaweedfs:4.48
@@ -218,6 +227,8 @@ services:
       TRITON_GRPC_ADDR: triton:8001
       S3_ENDPOINT: http://s3:8333
       JWKS_URL: http://control-api:8081/.well-known/jwks.json
+      SEARCH_API_URL: http://search-api:8080
+      SMTP_ADDR: mailpit:1025
     depends_on: &app-deps
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }

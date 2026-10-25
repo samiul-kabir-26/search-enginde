@@ -36,7 +36,17 @@ type Stores struct {
 
 // Build loads the tenant's active config and returns a Target writing to its aliases.
 func (b *Builder) Build(ctx context.Context, id tenant.ID) (*Target, Stores, error) {
-	version, cfg, err := b.Tenants.ActiveConfig(ctx, id)
+	return b.BuildVersion(ctx, id, 0)
+}
+
+// BuildVersion is Build for a specific published config version (0 means the active one).
+func (b *Builder) BuildVersion(ctx context.Context, id tenant.ID, v int) (*Target, Stores, error) {
+	version, cfg, err := v, (*tenant.Config)(nil), error(nil)
+	if v == 0 {
+		version, cfg, err = b.Tenants.ActiveConfig(ctx, id)
+	} else {
+		cfg, err = b.Tenants.ConfigVersion(ctx, id, v)
+	}
 	if err != nil {
 		return nil, Stores{}, err
 	}

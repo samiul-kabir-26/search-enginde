@@ -61,6 +61,8 @@ type config struct {
 	JWTIssuer       string
 	CursorSecret    string
 	ConfigTTL       time.Duration
+	ClickHouse      searchapi.ClickHouseConfig
+	ShadowWorkers   int
 	OTLPEndpoint    string
 }
 
@@ -83,8 +85,13 @@ func loadConfig() (config, error) {
 		JWKSURL:         env.Required("JWKS_URL"),
 		JWTIssuer:       env.Required("JWT_ISSUER"),
 		CursorSecret:    env.Required("SEARCH_CURSOR_SECRET"),
-		ConfigTTL:       env.Duration("TENANT_CONFIG_TTL", 30*time.Second),
-		OTLPEndpoint:    env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		ConfigTTL:       env.Duration("TENANT_CONFIG_TTL", 10*time.Minute),
+		ClickHouse: searchapi.ClickHouseConfig{
+			Addr: env.Required("CLICKHOUSE_ADDR"), Database: env.String("CLICKHOUSE_DB", "searchengine"),
+			Username: env.String("CLICKHOUSE_USER", "default"), Password: env.String("CLICKHOUSE_PASSWORD", ""),
+		},
+		ShadowWorkers: env.Int("SHADOW_WORKERS", 8),
+		OTLPEndpoint:  env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 	}
 	return c, env.Err()
 }
@@ -162,12 +169,19 @@ func run(ctx context.Context) error {
 	if err := verifier.Refresh(ctx); err != nil {
 		log.Warn("initial JWKS fetch failed; retrying on first request", "err", err)
 	}
+	resolver := tenant.NewResolver(store, cfg.ConfigTTL)
+	reg := registry.New(registry.Platform{
+		Triton: triton, OpenSearch: osClient, Qdrant: qClient,
+		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
+	}, registry.Options{Size: 1024, DrainGrace: 30 * time.Second, Refresh: 2 * time.Minute}, log)
+	sink, err := searchapi.NewClickHouseSink(cfg.ClickHouse, log)
+	if err != nil {
+		return err
+	}
 	svc := &searchapi.Service{
-		Resolver: tenant.NewResolver(store, cfg.ConfigTTL),
-		Providers: registry.New(registry.Platform{
-			Triton: triton, OpenSearch: osClient, Qdrant: qClient,
-			Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
-		}, 2*time.Minute, log),
+		Resolver:  resolver,
+		Providers: reg,
+		Shadow:    searchapi.NewShadow(engine, reg, sink, cfg.ShadowWorkers, log),
 		Engine:    engine,
 		Snapshots: searchapi.NewSnapshots(rdb),
 		Cursors:   searchapi.NewCursors([]byte(cfg.CursorSecret)),
@@ -191,6 +205,29 @@ func run(ctx context.Context) error {
 	}
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { verifier.Run(gctx, 10*time.Minute); return nil })
+	g.Go(func() error { reg.Run(gctx, 5*time.Second); return nil })
+	g.Go(func() error { sink.Run(gctx, time.Second, 500); return nil })
+	g.Go(func() error {
+		resolver.Watch(gctx, rdb, 30*time.Second, log, func(id tenant.ID) {
+			res, err := resolver.Get(gctx, id)
+			if err != nil {
+				reg.Supersede(id)
+				return
+			}
+			keep := []int{res.ConfigVersion}
+			if res.Shadow != nil {
+				keep = append(keep, res.Shadow.ConfigVersion)
+			}
+			reg.Supersede(id, keep...)
+			// Build the new version's providers before traffic needs them.
+			go func() {
+				if _, err := reg.For(gctx, res); err != nil {
+					log.Warn("provider prewarm failed", "tenant", id, "version", res.ConfigVersion, "err", err)
+				}
+			}()
+		})
+		return nil
+	})
 	g.Go(func() error { return platform.Serve(gctx, srv, cfg.ShutdownTimeout, log) })
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("serve: %w", err)

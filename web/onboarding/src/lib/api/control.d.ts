@@ -13,7 +13,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Create tenant and owner user; seeds draft config and onboarding state */
+        /**
+         * Create tenant and owner user; seeds draft config and onboarding state
+         * @description Creates the tenant, its owner, the default draft config and onboarding state, and emails a verification link. Idempotent with Idempotency-Key.
+         */
         post: operations["signup"];
         delete?: never;
         options?: never;
@@ -47,8 +50,82 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Exchange a tenant API key for a JWT */
+        /**
+         * Exchange a tenant API key for a JWT
+         * @description The token's TTL is the platform setting auth.api_token_ttl.
+         */
         post: operations["exchangeApiKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate the refresh cookie and issue a new access token
+         * @description Reads the se_refresh cookie. Presenting a refresh token that was already rotated revokes its whole family (reuse detection) and returns 401.
+         */
+        post: operations["refreshSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/logout": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke the refresh token family and clear the cookie */
+        post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/verify-email": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Confirm an email address with the token from the verification link */
+        post: operations["verifyEmail"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/auth/resend-verification": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Email a fresh verification link to the calling user */
+        post: operations["resendVerification"];
         delete?: never;
         options?: never;
         head?: never;
@@ -64,6 +141,152 @@ export interface paths {
         };
         /** JSON Web Key Set used by search-api */
         get: operations["jwks"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/login": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Platform admin login */
+        post: operations["adminLogin"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read platform settings */
+        get: operations["getPlatformSettings"];
+        /**
+         * Replace platform settings (validated against bounds)
+         * @description Every control-api replica reloads via Redis pub/sub (platform.settings.changed).
+         */
+        put: operations["putPlatformSettings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/plans": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List plans */
+        get: operations["listPlans"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/plans/{plan_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Create or replace a plan */
+        put: operations["putPlan"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List JWT signing keys */
+        get: operations["listSigningKeys"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/keys/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate the signing key now
+         * @description The old key keeps verifying (published in the JWKS) until the retention window ends.
+         */
+        post: operations["rotateSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/keys/{kid}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Revoke a signing key immediately
+         * @description Tokens signed by the key stop verifying at once; revoking the active key rotates first.
+         */
+        post: operations["revokeSigningKey"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/admin/tenants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List tenants */
+        get: operations["listTenants"];
         put?: never;
         post?: never;
         delete?: never;
@@ -117,7 +340,7 @@ export interface paths {
         /** List users */
         get: operations["listUsers"];
         put?: never;
-        /** Invite a user */
+        /** Add a user with an initial password (requires tenant:admin) */
         post: operations["createUser"];
         delete?: never;
         options?: never;
@@ -132,8 +355,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get a user */
-        get: operations["getUser"];
+        get?: never;
         put?: never;
         post?: never;
         /** Remove a user */
@@ -169,7 +391,10 @@ export interface paths {
             cookie?: never;
         };
         get?: never;
-        /** Save a step payload into the draft and validate it */
+        /**
+         * Save a step payload into the draft and validate it
+         * @description Steps unlock in order; a completed step can be revisited. Invalid payloads return 422 with field errors and change nothing.
+         */
         put: operations["saveOnboardingStep"];
         post?: never;
         delete?: never;
@@ -221,7 +446,10 @@ export interface paths {
         };
         /** Get the draft config */
         get: operations["getConfigDraft"];
-        /** Replace the draft config */
+        /**
+         * Replace the draft config
+         * @description Saves the document even when it is invalid; the response carries the validation.
+         */
         put: operations["putConfigDraft"];
         post?: never;
         delete?: never;
@@ -257,7 +485,7 @@ export interface paths {
         /** List config versions */
         get: operations["listConfigVersions"];
         put?: never;
-        /** Publish the draft as a new immutable version */
+        /** Publish the draft as the next immutable version */
         post: operations["publishConfig"];
         delete?: never;
         options?: never;
@@ -291,7 +519,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Activate a version (rollback = activate an older one) */
+        /**
+         * Activate a version (rollback = activate an older one)
+         * @description Requires a verified email. The previous active version is retired and search-api switches within seconds (Redis pub/sub, with a 30 s reconcile as the fallback).
+         */
         post: operations["activateConfigVersion"];
         delete?: never;
         options?: never;
@@ -308,7 +539,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Run a version in shadow on sampled traffic */
+        /**
+         * Run a version in shadow on sampled traffic
+         * @description sample_rate 0 clears shadow mode.
+         */
         post: operations["shadowConfigVersion"];
         delete?: never;
         options?: never;
@@ -479,7 +713,8 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /** List recent index jobs */
+        get: operations["listIndexJobs"];
         put?: never;
         /** Backfill for a config version: build v{n+1}, then swap the alias */
         post: operations["createIndexJob"];
@@ -515,7 +750,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Presigned upload for JSONL/CSV batch ingestion */
+        /** Presign a catalog upload (JSONL, one tenant product per line) */
         post: operations["createCatalogUpload"];
         delete?: never;
         options?: never;
@@ -638,7 +873,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Run search against the draft or a version with explain=true */
+        /**
+         * Search the draft or a version with explain forced on
+         * @description Proxies to search-api with a one-minute search:playground token; config_version is sent as X-Config-Version.
+         */
         post: operations["playgroundSearch"];
         delete?: never;
         options?: never;
@@ -697,6 +935,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenants/{tid}/playground/search/image": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Image search against the draft or a version with explain forced on */
+        post: operations["playgroundImageSearch"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -722,20 +977,25 @@ export interface components {
             plan: string;
             /** Format: email */
             email: string;
+            /** @description At least auth.password_min_length characters (default 12). */
             password: string;
         };
         LoginRequest: {
-            tenant_slug?: string;
+            /** @description Tenant slug */
+            tenant: string;
             /** Format: email */
             email: string;
             password: string;
         };
         SessionResponse: {
-            token: string;
-            tenant_id: string;
-            user_id?: string;
-            /** Format: date-time */
-            expires_at: string;
+            access_token: string;
+            /** @constant */
+            token_type: "Bearer";
+            /** @description Seconds */
+            expires_in: number;
+            /** @description Absent for platform admins */
+            tenant_id?: string;
+            user?: components["schemas"]["User"];
         };
         TokenRequest: {
             api_key: string;
@@ -754,24 +1014,29 @@ export interface components {
         /** @enum {string} */
         Scope: "search:read" | "search:debug" | "events:write";
         ApiKeyCreate: {
-            name: string;
+            /**
+             * @default [
+             *       "search:read",
+             *       "events:write"
+             *     ]
+             */
             scopes: components["schemas"]["Scope"][];
         };
         ApiKey: {
             id: string;
-            name?: string;
             prefix: string;
             scopes: components["schemas"]["Scope"][];
             /** Format: date-time */
             created_at: string;
             /** Format: date-time */
-            last_used_at?: string | null;
+            last_used_at?: string;
             /** Format: date-time */
-            revoked_at?: string | null;
+            revoked_at?: string;
         };
-        ApiKeyCreated: components["schemas"]["ApiKey"] & {
-            /** @description Shown once. */
-            secret: string;
+        ApiKeyCreated: {
+            /** @description The secret; shown once. */
+            api_key: string;
+            key: components["schemas"]["ApiKey"];
         };
         /** @enum {string} */
         Role: "owner" | "admin" | "developer" | "viewer";
@@ -780,13 +1045,16 @@ export interface components {
             /** Format: email */
             email: string;
             role: components["schemas"]["Role"];
+            email_verified: boolean;
             /** Format: date-time */
-            created_at?: string;
+            created_at: string;
         };
         UserCreate: {
             /** Format: email */
             email: string;
             role: components["schemas"]["Role"];
+            /** @description Initial password; the policy applies. */
+            password: string;
         };
         UserUpdate: {
             role: components["schemas"]["Role"];
@@ -794,30 +1062,43 @@ export interface components {
         /** @enum {string} */
         OnboardingStep: "account" | "engine_tour" | "catalog" | "retrieval" | "policies" | "ranking" | "personalization" | "index_build" | "playground" | "go_live";
         OnboardingState: {
-            current_step: components["schemas"]["OnboardingStep"];
+            /** @description An OnboardingStep, or done */
+            current_step: string;
             completed_steps: components["schemas"]["OnboardingStep"][];
-            blockers?: components["schemas"]["FieldError"][];
+            /** @description All steps in order */
+            steps: components["schemas"]["OnboardingStep"][];
         };
-        /** @description Step-specific payload (docs/ONBOARDING.md §4). Skeleton; the full schema is defined in the milestone that implements this endpoint. */
-        StepPayload: {
-            [key: string]: unknown;
-        };
+        /** @description The schema for the step in the path (bodies of different steps can overlap); engine_tour and playground take an empty object. */
+        StepPayload: components["schemas"]["CatalogStep"] | components["schemas"]["RetrievalStep"] | components["schemas"]["PoliciesStep"] | components["schemas"]["RankingStep"] | components["schemas"]["PersonalizationStep"] | components["schemas"]["IndexBuildStep"] | components["schemas"]["GoLiveStep"] | Record<string, never>;
         StepResult: {
-            valid: boolean;
-            errors?: components["schemas"]["FieldError"][];
-            warnings?: components["schemas"]["FieldError"][];
-            next_step?: components["schemas"]["OnboardingStep"];
+            step: components["schemas"]["OnboardingStep"];
+            /** @description An OnboardingStep, or done */
+            next_step: string;
+            warnings: components["schemas"]["FieldError"][];
+            /** @description index_build: {version, job}; go_live: {version, state, api_key?, key?} (the key is created once) */
+            data?: {
+                [key: string]: unknown;
+            };
+            state: components["schemas"]["OnboardingState"];
         };
         EngineExplainer: {
             stages: {
                 id: string;
+                number: number;
                 title: string;
-                description: string;
-                configurable?: string[];
-                default?: string;
-                /** @enum {string} */
-                current?: "default" | "custom";
-                wizard_step?: components["schemas"]["OnboardingStep"];
+                summary: string;
+                configurable: string[];
+                default: string;
+                /** @description Where a custom model or store plugs in */
+                injection: string;
+                step: components["schemas"]["OnboardingStep"];
+                /**
+                 * @description Tenant view only
+                 * @enum {string}
+                 */
+                badge?: "Default" | "Custom";
+                /** @description Tenant view only: the current choice */
+                choice?: string;
             }[];
         };
         /** @description Tenant pipeline config, schema_version 1 (docs/TENANT_CONFIG.md §3). Skeleton; the full schema is defined in the milestone that implements this endpoint. */
@@ -836,6 +1117,7 @@ export interface components {
         ConfigVersionSummary: {
             version: number;
             state: components["schemas"]["ConfigVersionState"];
+            shadow_sample_rate?: number;
             /** Format: date-time */
             created_at: string;
             created_by?: string;
@@ -844,6 +1126,7 @@ export interface components {
             document: components["schemas"]["ConfigDocument"];
         };
         ShadowRequest: {
+            /** @description 0 clears shadow mode */
             sample_rate: number;
         };
         ConfigDiff: {
@@ -852,9 +1135,10 @@ export interface components {
             changes: {
                 /** @enum {string} */
                 op: "add" | "remove" | "replace";
+                /** @description JSON Pointer */
                 path: string;
-                old?: unknown;
-                new?: unknown;
+                from?: unknown;
+                to?: unknown;
             }[];
         };
         SecretCreate: {
@@ -935,51 +1219,66 @@ export interface components {
             description?: string;
         };
         UploadRequest: {
-            filename: string;
-            size_bytes: number;
-            content_type?: string;
+            /**
+             * @default jsonl
+             * @enum {string}
+             */
+            format: "jsonl";
         };
         PresignedUpload: {
-            url: string;
+            /** @description Pass to POST .../index/jobs */
+            upload_id: string;
             /** @constant */
             method: "PUT";
-            headers?: {
+            url: string;
+            headers: {
                 [key: string]: string;
             };
             /** Format: date-time */
             expires_at: string;
-            object_uri: string;
         };
         IndexJobCreate: {
             config_version: number;
+            /** @description Index this upload; without it the job backfills from the catalog topic */
+            upload_id?: string;
         };
         IndexJob: {
             id: string;
             config_version: number;
-            status: string;
+            /** @enum {string} */
+            source: "topic" | "upload";
+            /** @enum {string} */
+            status: "queued" | "running" | "succeeded" | "failed";
             total: number;
             done: number;
             failed: number;
+            index_version?: number;
+            error?: string;
             /** Format: date-time */
-            started_at?: string | null;
+            created_at: string;
             /** Format: date-time */
-            finished_at?: string | null;
-            error?: string | null;
+            started_at?: string;
+            /** Format: date-time */
+            finished_at?: string;
         };
         MappingPreviewRequest: {
-            sample: {
-                [key: string]: unknown;
-            };
+            /** @description Platform field name to JSONPath in the tenant document */
             field_mapping: {
                 [key: string]: string;
             };
+            custom_fields?: components["schemas"]["CustomField"][];
+            samples: {
+                [key: string]: unknown;
+            }[];
         };
         MappingPreviewResponse: {
-            valid: boolean;
-            product?: {
-                [key: string]: unknown;
-            };
-            errors?: components["schemas"]["FieldError"][];
+            results: {
+                /** @description The normalized platform product */
+                product: {
+                    [key: string]: unknown;
+                };
+                errors?: components["schemas"]["FieldError"][];
+            }[];
         };
         CampaignInput: {
             vendor_id: string;
@@ -1017,21 +1316,173 @@ export interface components {
                 ctr: number;
             }[];
         };
+        /** @description A search-api SearchRequest (search.yaml) plus config_version. */
         PlaygroundRequest: {
-            /** @enum {string} */
-            query_type: "text" | "image" | "similar";
-            /** @description draft or a version number */
-            target?: string;
+            /** @default draft */
+            config_version: number | "draft";
             q?: string;
-            image_base64?: string;
-            product_id?: string;
-            filters?: {
+        } & {
+            [key: string]: unknown;
+        };
+        /** @description The search-api SearchResponse (search.yaml), always with the explain trace. */
+        PlaygroundResponse: {
+            [key: string]: unknown;
+        };
+        AdminLoginRequest: {
+            /** Format: email */
+            email: string;
+            password: string;
+        };
+        VerifyEmailRequest: {
+            token: string;
+        };
+        CustomField: {
+            name: string;
+            /** @enum {string} */
+            type: "keyword" | "keyword[]" | "text" | "int" | "float" | "bool" | "date" | "object";
+            /** @description JSONPath */
+            source: string;
+            filterable?: boolean;
+            facetable?: boolean;
+            searchable?: boolean;
+            sortable?: boolean;
+            required?: boolean;
+        };
+        CatalogStep: {
+            /** @enum {string} */
+            ingestion: "events" | "upload";
+            /** @description Platform field name to JSONPath in the tenant document */
+            field_mapping: {
+                [key: string]: string;
+            };
+            custom_fields?: components["schemas"]["CustomField"][];
+            samples?: {
+                [key: string]: unknown;
+            }[];
+        };
+        RetrievalStep: {
+            /**
+             * @default balanced
+             * @enum {string}
+             */
+            preset: "balanced" | "keyword" | "semantic" | "visual";
+            /** @description ConfigDocument embedders (platform only until M5) */
+            embedders?: {
+                [key: string]: unknown;
+            };
+            /** @description ConfigDocument stores (platform only until M5) */
+            stores?: {
                 [key: string]: unknown;
             };
         };
-        /** @description search-api SearchResponse with the explain trace. Skeleton; the full schema is defined in the milestone that implements this endpoint. */
-        PlaygroundResponse: {
-            [key: string]: unknown;
+        PoliciesStep: {
+            in_stock?: boolean;
+            ship_to_region?: string;
+            verified_vendors?: boolean;
+            rules?: {
+                id: string;
+                kind: string;
+                expr: string;
+            }[];
+        };
+        RankingStep: {
+            /**
+             * @description learned and byo return not_available until M7
+             * @default default
+             * @enum {string}
+             */
+            mode: "default" | "learned" | "byo";
+            weights?: {
+                [key: string]: number;
+            };
+        };
+        PersonalizationStep: {
+            personalization?: {
+                [key: string]: unknown;
+            };
+            diversity?: {
+                [key: string]: unknown;
+            };
+            ads?: {
+                [key: string]: unknown;
+            };
+        };
+        IndexBuildStep: {
+            /** @description Backfill from an upload instead of the catalog topic */
+            upload_id?: string;
+        };
+        GoLiveStep: {
+            /**
+             * @default activate
+             * @enum {string}
+             */
+            mode: "activate";
+            /** @description Defaults to the latest published version */
+            version?: number;
+        };
+        DraftView: {
+            document: components["schemas"]["ConfigDocument"];
+            schema_version: number;
+            /** Format: date-time */
+            updated_at: string;
+            validation?: components["schemas"]["ValidationResult"];
+        };
+        PlatformSettings: {
+            auth: {
+                password: {
+                    memory_kib: number;
+                    time: number;
+                    threads: number;
+                };
+                password_min_length: number;
+                /** @description 5m to 60m */
+                access_token_ttl: string;
+                /** @description 24h to 720h */
+                refresh_token_ttl: string;
+                /** @description 5m to 60m */
+                api_token_ttl: string;
+                /** @description 7 to 90 days */
+                key_rotation: string;
+                /** @description 1 to 30 days and at least every token TTL */
+                key_retention: string;
+                /** @description 1h to 7 days */
+                email_verification_ttl: string;
+            };
+        };
+        Plan: {
+            readonly id?: string;
+            name: string;
+            max_total_ms: number;
+            search_rps: number;
+            search_burst: number;
+            events_rps: number;
+            byo_allowed: boolean;
+            egress_allowlist?: string[];
+            max_custom_fields: number;
+            max_page_depth: number;
+        };
+        SigningKey: {
+            kid: string;
+            /** @enum {string} */
+            status: "active" | "retired" | "revoked";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            retired_at?: string;
+            /** Format: date-time */
+            publish_until?: string;
+        };
+        Tenant: {
+            id: string;
+            slug: string;
+            name: string;
+            plan: string;
+            region: string;
+            status: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
         };
     };
     responses: {
@@ -1076,6 +1527,8 @@ export interface operations {
             /** @description OK */
             201: {
                 headers: {
+                    /** @description se_refresh: HttpOnly, SameSite=Strict, Path=/v1/; the rotating refresh token. */
+                    "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1101,6 +1554,8 @@ export interface operations {
             /** @description OK */
             200: {
                 headers: {
+                    /** @description se_refresh: HttpOnly, SameSite=Strict, Path=/v1/; the rotating refresh token. */
+                    "Set-Cookie"?: string;
                     [name: string]: unknown;
                 };
                 content: {
@@ -1135,6 +1590,90 @@ export interface operations {
             "4XX": components["responses"]["Problem"];
         };
     };
+    refreshSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    /** @description se_refresh: HttpOnly, SameSite=Strict, Path=/v1/; the rotating refresh token. */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    logout: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    verifyEmail: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VerifyEmailRequest"];
+            };
+        };
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    resendVerification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Accepted */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
     jwks: {
         parameters: {
             query?: never;
@@ -1156,12 +1695,225 @@ export interface operations {
             "4XX": components["responses"]["Problem"];
         };
     };
-    listApiKeys: {
+    adminLogin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AdminLoginRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    /** @description se_refresh: HttpOnly, SameSite=Strict, Path=/v1/; the rotating refresh token. */
+                    "Set-Cookie"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionResponse"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    getPlatformSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSettings"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    putPlatformSettings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PlatformSettings"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlatformSettings"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    listPlans: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["Plan"][];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    putPlan: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                plan_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Plan"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Plan"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    listSigningKeys: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["SigningKey"][];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    rotateSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        active_kid: string;
+                    };
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    revokeSigningKey: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                kid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description No content */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    listTenants: {
         parameters: {
             query?: {
-                cursor?: components["parameters"]["Cursor"];
-                limit?: components["parameters"]["Limit"];
+                limit?: number;
+                offset?: number;
             };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["Tenant"][];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    listApiKeys: {
+        parameters: {
+            query?: never;
             header?: never;
             path: {
                 tid: string;
@@ -1178,7 +1930,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         items: components["schemas"]["ApiKey"][];
-                        next_cursor?: string | null;
                     };
                 };
             };
@@ -1197,7 +1948,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["ApiKeyCreate"];
             };
@@ -1239,10 +1990,7 @@ export interface operations {
     };
     listUsers: {
         parameters: {
-            query?: {
-                cursor?: components["parameters"]["Cursor"];
-                limit?: components["parameters"]["Limit"];
-            };
+            query?: never;
             header?: never;
             path: {
                 tid: string;
@@ -1259,7 +2007,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         items: components["schemas"]["User"][];
-                        next_cursor?: string | null;
                     };
                 };
             };
@@ -1286,30 +2033,6 @@ export interface operations {
         responses: {
             /** @description OK */
             201: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["User"];
-                };
-            };
-            "4XX": components["responses"]["Problem"];
-        };
-    };
-    getUser: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                tid: string;
-                user_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description OK */
-            200: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1395,7 +2118,10 @@ export interface operations {
     };
     saveOnboardingStep: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Apply platform defaults to the retrieval through personalization steps and mark them complete. */
+                use_defaults?: boolean;
+            };
             header?: never;
             path: {
                 tid: string;
@@ -1403,7 +2129,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["StepPayload"];
             };
@@ -1482,7 +2208,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfigDocument"];
+                    "application/json": components["schemas"]["DraftView"];
                 };
             };
             "4XX": components["responses"]["Problem"];
@@ -1509,7 +2235,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfigDocument"];
+                    "application/json": components["schemas"]["DraftView"];
                 };
             };
             "4XX": components["responses"]["Problem"];
@@ -1540,10 +2266,7 @@ export interface operations {
     };
     listConfigVersions: {
         parameters: {
-            query?: {
-                cursor?: components["parameters"]["Cursor"];
-                limit?: components["parameters"]["Limit"];
-            };
+            query?: never;
             header?: never;
             path: {
                 tid: string;
@@ -1560,7 +2283,6 @@ export interface operations {
                 content: {
                     "application/json": {
                         items: components["schemas"]["ConfigVersionSummary"][];
-                        next_cursor?: string | null;
                     };
                 };
             };
@@ -1587,7 +2309,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ConfigVersion"];
+                    "application/json": components["schemas"]["ConfigVersionSummary"];
                 };
             };
             "4XX": components["responses"]["Problem"];
@@ -1987,6 +2709,31 @@ export interface operations {
             "4XX": components["responses"]["Problem"];
         };
     };
+    listIndexJobs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        items: components["schemas"]["IndexJob"][];
+                    };
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
     createIndexJob: {
         parameters: {
             query?: never;
@@ -2005,8 +2752,8 @@ export interface operations {
             };
         };
         responses: {
-            /** @description OK */
-            201: {
+            /** @description Accepted */
+            202: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2050,7 +2797,7 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
                 "application/json": components["schemas"]["UploadRequest"];
             };
@@ -2420,6 +3167,38 @@ export interface operations {
                     "text/plain": string;
                 };
             };
+        };
+    };
+    playgroundImageSearch: {
+        parameters: {
+            query?: {
+                /** @description A version number or draft. */
+                config_version?: string;
+            };
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": {
+                    [key: string]: unknown;
+                };
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlaygroundResponse"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
         };
     };
 }

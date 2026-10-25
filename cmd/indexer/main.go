@@ -55,6 +55,8 @@ type config struct {
 	S3AccessKey     string
 	S3SecretKey     string
 	S3ModelsBucket  string
+	S3UploadBucket  string
+	JobPoll         time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -77,6 +79,8 @@ func loadConfig() (config, error) {
 		S3AccessKey:     env.Required("S3_ACCESS_KEY"),
 		S3SecretKey:     env.Required("S3_SECRET_KEY"),
 		S3ModelsBucket:  env.Required("S3_BUCKET_MODELS"),
+		S3UploadBucket:  env.Required("S3_BUCKET_UPLOADS"),
+		JobPoll:         env.Duration("INDEXER_JOB_POLL", 2*time.Second),
 	}
 	return c, env.Err()
 }
@@ -171,6 +175,8 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 		log.Info("consuming", "group", group, "brokers", cfg.KafkaBrokers)
 		return consumer.Run(gctx)
 	})
+	jobs := &indexer.JobRunner{DB: db, Builder: builder, Processor: proc, Brokers: cfg.KafkaBrokers, S3: s3c, UploadBucket: cfg.S3UploadBucket, Log: log}
+	g.Go(func() error { jobs.Run(gctx, cfg.JobPoll); return nil })
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("indexer: %w", err)
 	}

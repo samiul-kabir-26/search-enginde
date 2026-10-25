@@ -23,6 +23,8 @@ import (
 // Verifier checks EdDSA tokens against a JWKS that it fetches, caches and refreshes: on a
 // schedule, and on an unknown kid (at most once per minRefresh) so key rotation needs no restart.
 type Verifier struct {
+	// local, when set, resolves keys from an in-process key ring instead of fetching a JWKS.
+	local      KeySource
 	url        string
 	issuer     string
 	client     *http.Client
@@ -32,6 +34,16 @@ type Verifier struct {
 	mu        sync.RWMutex
 	keys      map[string]ed25519.PublicKey
 	fetchedAt time.Time
+}
+
+// KeySource resolves a public key by kid.
+type KeySource interface {
+	PublicKey(kid string) (ed25519.PublicKey, bool)
+}
+
+// NewLocalVerifier verifies tokens against an in-process key source (control-api's key ring).
+func NewLocalVerifier(src KeySource, issuer string) *Verifier {
+	return &Verifier{local: src, issuer: issuer, keys: map[string]ed25519.PublicKey{}}
 }
 
 // NewVerifier returns a verifier for tokens issued by issuer and signed by keys at jwksURL.
@@ -111,6 +123,12 @@ func parseJWKS(set JWKS) (map[string]ed25519.PublicKey, error) {
 }
 
 func (v *Verifier) key(ctx context.Context, kid string) (ed25519.PublicKey, error) {
+	if v.local != nil {
+		if k, ok := v.local.PublicKey(kid); ok {
+			return k, nil
+		}
+		return nil, fmt.Errorf("unknown signing key %q", kid)
+	}
 	v.mu.RLock()
 	k, ok := v.keys[kid]
 	stale := time.Since(v.fetchedAt) >= v.minRefresh
@@ -146,15 +164,19 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Principal, error) 
 	if err != nil {
 		return Principal{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
-	id, err := tenant.ParseID(c.TenantID)
-	if err != nil {
-		return Principal{}, fmt.Errorf("%w: tid: %w", ErrUnauthenticated, err)
-	}
 	scopes := map[string]bool{}
 	for _, s := range strings.Fields(c.Scope) {
 		scopes[s] = true
 	}
-	return Principal{Tenant: id, Subject: c.Subject, Scopes: scopes}, nil
+	var id tenant.ID
+	if c.TenantID != "" {
+		if id, err = tenant.ParseID(c.TenantID); err != nil {
+			return Principal{}, fmt.Errorf("%w: tid: %w", ErrUnauthenticated, err)
+		}
+	} else if !scopes[ScopePlatformAdmin] {
+		return Principal{}, fmt.Errorf("%w: tid is required", ErrUnauthenticated)
+	}
+	return Principal{Tenant: id, Subject: c.Subject, Scopes: scopes, Role: c.Role, EmailVerified: c.EmailVerified}, nil
 }
 
 // Middleware authenticates the bearer token and requires scope. The tenant comes only from the
@@ -175,7 +197,7 @@ func Middleware(v *Verifier, scope string) func(http.Handler) http.Handler {
 				platform.WriteProblem(w, platform.Problem{Status: http.StatusUnauthorized, Detail: "the token is invalid or expired"})
 				return
 			}
-			if !p.Has(scope) {
+			if p.Tenant == "" || !p.Has(scope) {
 				w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", scope=%q`, scope))
 				platform.WriteProblem(w, platform.Problem{Status: http.StatusForbidden, Detail: "the token lacks scope " + scope})
 				return

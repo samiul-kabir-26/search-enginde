@@ -73,8 +73,12 @@ func (s *Snapshots) Get(ctx context.Context, tenant, key string) (*Snapshot, boo
 	return &snap, true, nil
 }
 
-// Put stores a snapshot; degraded ones expire quickly.
+// Put stores a snapshot; degraded ones expire quickly, and a degraded empty one is not stored
+// because there is nothing to page and caching it would pin the failure.
 func (s *Snapshots) Put(ctx context.Context, tenant, key string, snap *Snapshot) error {
+	if snap.Degraded && len(snap.Items) == 0 {
+		return nil
+	}
 	b, err := json.Marshal(snap)
 	if err != nil {
 		return fmt.Errorf("encode snapshot: %w", err)

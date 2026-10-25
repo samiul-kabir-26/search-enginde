@@ -81,13 +81,28 @@ UI requirements:
 | 8 | **Playground** | Text and image search against the new version, with an explain panel showing per-stage candidates, scores and fallbacks; side-by-side comparison with platform defaults | None |
 | 9 | **Go live** | Activate the version, optionally with shadow mode first; create a production API key; copy the integration snippet | Version active; API key created |
 
+### 4.1 Step API as implemented (M4)
+
+Each step is `PUT /v1/tenants/{tid}/onboarding/steps/{step}` with a strict JSON body (unknown fields are rejected). A valid step edits the tenant's **draft** config, marks the step complete and returns `{step, next_step, warnings, data, state}`. An invalid step returns 422 with every field error and changes nothing. Steps unlock in order (409 when skipping ahead) and a completed step can be revisited. `?use_defaults=true` on any step from retrieval to personalization applies the platform defaults and completes all four.
+
+| Step | Body | Notes |
+|---|---|---|
+| `engine_tour`, `playground` | `{}` | Recorded only |
+| `catalog` | `{ingestion: "events"\|"upload", field_mapping, custom_fields?, samples}` | The mandatory catalog fields plus `vendor_id` and `image_urls` must be mapped; 1–20 samples must map without errors (same engine as `catalog/mapping/preview`) |
+| `retrieval` | `{preset?: "balanced"\|"keyword"\|"semantic"\|"visual", embedders?, stores?}` | Presets set the retriever mix and weights. Until M5 only platform embedders and stores are accepted (`byo_unavailable`) |
+| `policies` | `{in_stock?, ship_to_region?, verified_vendors?, rules?}` | Toggles become `policy.always_filters`. CEL `rules` are saved with a `deferred` warning; they are compiled and enforced from M7 |
+| `ranking` | `{mode?: "default", weights?}` | `default_linear` with optional weight overrides. `learned` and `byo` return `not_available` until M7 |
+| `personalization` | `{personalization?, diversity?, ads?}` | The config sections of the same names, with the range rules from `docs/TENANT_CONFIG.md` §5 |
+| `index_build` | `{upload_id?}` | Publishes the draft (full validation) and queues an index job; `data` is `{version, job}`. Poll `GET /index/jobs/{id}` |
+| `go_live` | `{version?, mode?: "activate"}` | Needs a verified email. Activates the version (default: the latest published) and, if the tenant has no API key yet, creates one; `data.api_key` is shown once. Shadow mode is started from the config API first |
+
 ## 5. Implementation notes (`web/onboarding`)
 
 **Stack and structure**
 - Next.js App Router, TypeScript strict, Tailwind CSS.
 - Server Components for data loading; client components only for interactive pieces (diagram, mapper, CEL editor, sliders, upload).
 - API access goes through a typed client generated from `api/openapi/control.yaml` (`openapi-typescript`).
-- The session JWT is held in an httpOnly secure cookie, and calls are made from Route Handlers or Server Actions, never exposing tokens to client JS.
+- control-api returns a short-lived access token and sets the rotating refresh token as the `se_refresh` httpOnly cookie. The app keeps the access token server-side (httpOnly cookie) and calls the API from Route Handlers or Server Actions, so client JS never sees tokens.
 
 **Routes**
 - `/onboarding/[step]`, with a step guard that redirects to `current_step` if the tenant tries to skip ahead without completion.

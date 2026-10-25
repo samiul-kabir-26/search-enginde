@@ -163,9 +163,16 @@ type BackfillReport struct {
 // drops versions older than the previous one (kept for rollback). Events produced while the
 // backfill runs are read until the end offsets observed when it finished the first pass.
 func Backfill(ctx context.Context, brokers []string, id tenant.ID, builder *Builder, proc *Processor, log *slog.Logger) (BackfillReport, error) {
+	return BackfillVersion(ctx, brokers, id, 0, builder, proc, log, nil)
+}
+
+// BackfillVersion is Backfill using config version v (0 = active), reporting progress after
+// every polled batch.
+func BackfillVersion(ctx context.Context, brokers []string, id tenant.ID, v int, builder *Builder, proc *Processor, log *slog.Logger,
+	progress func(Result)) (BackfillReport, error) {
 	start := time.Now()
 	rep := BackfillReport{Tenant: id}
-	t, stores, err := builder.Build(ctx, id)
+	t, stores, err := builder.BuildVersion(ctx, id, v)
 	if err != nil {
 		return rep, err
 	}
@@ -207,6 +214,9 @@ func Backfill(ctx context.Context, brokers []string, id tenant.ID, builder *Buil
 			delete(alive, pid)
 		}
 		rep.Result.Add(r)
+		if progress != nil {
+			progress(rep.Result)
+		}
 		return nil
 	}
 	for range 2 {

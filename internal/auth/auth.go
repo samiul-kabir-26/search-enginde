@@ -18,25 +18,54 @@ import (
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
-// Scopes (api/openapi/control.yaml Scope).
+// Scopes (api/openapi/control.yaml Scope). Data-plane scopes are granted to API keys; console
+// scopes come from a user's role; platform:admin is the operator.
 const (
-	ScopeSearchRead  = "search:read"
-	ScopeSearchDebug = "search:debug"
-	ScopeEventsWrite = "events:write"
+	ScopeSearchRead       = "search:read"
+	ScopeSearchDebug      = "search:debug"
+	ScopeSearchPlayground = "search:playground"
+	ScopeEventsWrite      = "events:write"
+	ScopeTenantRead       = "tenant:read"
+	ScopeTenantWrite      = "tenant:write"
+	ScopeTenantAdmin      = "tenant:admin"
+	ScopePlatformAdmin    = "platform:admin"
 )
+
+// DataPlaneScopes may be granted to API keys.
+func DataPlaneScopes() []string {
+	return []string{ScopeSearchRead, ScopeSearchDebug, ScopeEventsWrite}
+}
+
+// RoleScopes maps a tenant user role to console scopes.
+func RoleScopes(role string) []string {
+	switch role {
+	case "owner", "admin":
+		return []string{ScopeTenantRead, ScopeTenantWrite, ScopeTenantAdmin}
+	case "developer":
+		return []string{ScopeTenantRead, ScopeTenantWrite}
+	case "viewer":
+		return []string{ScopeTenantRead}
+	}
+	return nil
+}
 
 // Claims are the JWT claims (docs/API.md): tid, sub, scope (space separated), exp.
 type Claims struct {
-	TenantID string `json:"tid"`
-	Scope    string `json:"scope"`
+	TenantID      string `json:"tid,omitempty"`
+	Scope         string `json:"scope"`
+	Role          string `json:"role,omitempty"`
+	EmailVerified bool   `json:"ev,omitempty"`
 	jwt.RegisteredClaims
 }
 
 // Principal is the authenticated caller.
 type Principal struct {
-	Tenant  tenant.ID
-	Subject string
-	Scopes  map[string]bool
+	// Tenant is empty for platform admins.
+	Tenant        tenant.ID
+	Subject       string
+	Scopes        map[string]bool
+	Role          string
+	EmailVerified bool
 }
 
 // Has reports whether the principal holds scope.
@@ -84,16 +113,14 @@ func KeyID(pub ed25519.PublicKey) string {
 
 // Issue signs a token for a tenant subject with the given scopes and lifetime.
 func (s *Signer) Issue(t tenant.ID, subject string, scopes []string, ttl time.Duration) (string, error) {
+	return s.IssueClaims(Claims{TenantID: string(t), Scope: strings.Join(scopes, " "), RegisteredClaims: jwt.RegisteredClaims{Subject: subject}}, ttl)
+}
+
+// IssueClaims signs c, filling issuer and times.
+func (s *Signer) IssueClaims(c Claims, ttl time.Duration) (string, error) {
 	now := time.Now()
-	c := Claims{
-		TenantID: string(t),
-		Scope:    strings.Join(scopes, " "),
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer: s.issuer, Subject: subject,
-			IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-		},
-	}
+	c.Issuer = s.issuer
+	c.IssuedAt, c.NotBefore, c.ExpiresAt = jwt.NewNumericDate(now), jwt.NewNumericDate(now), jwt.NewNumericDate(now.Add(ttl))
 	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
 	tok.Header["kid"] = s.kid
 	signed, err := tok.SignedString(s.key)

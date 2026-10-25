@@ -40,6 +40,18 @@ func (f fixedResolver) Get(_ context.Context, id tenant.ID) (*tenant.Resolved, e
 	return f.res, nil
 }
 
+func (f fixedResolver) Pinned(_ context.Context, id tenant.ID, ref string) (*tenant.Resolved, error) {
+	if id != f.res.Tenant.ID || (ref != "draft" && ref != "7") {
+		return nil, tenant.ErrNotFound
+	}
+	pinned := *f.res
+	pinned.ConfigVersion, pinned.Draft = 7, ref == "draft"
+	if pinned.Draft {
+		pinned.ConfigVersion = 0
+	}
+	return &pinned, nil
+}
+
 type fixedProviders struct{ p *pipeline.Providers }
 
 func (f fixedProviders) For(context.Context, *tenant.Resolved) (*pipeline.Providers, error) {
@@ -58,6 +70,7 @@ func (c *countingEngine) Run(ctx context.Context, res *tenant.Resolved, p *pipel
 }
 
 type harness struct {
+	svc    *Service
 	srv    *httptest.Server
 	signer *auth.Signer
 	engine *countingEngine
@@ -86,6 +99,7 @@ func newHarness(t *testing.T) *harness {
 		Resolver: fixedResolver{res}, Providers: fixedProviders{p}, Engine: h.engine,
 		Snapshots: NewSnapshots(rdb), Cursors: NewCursors([]byte("k")), Limiter: redis_rate.NewLimiter(rdb), Log: log,
 	}
+	h.svc = svc
 	mux := http.NewServeMux()
 	svc.Routes(mux, auth.NewVerifier("http://unused", "iss", log).WithKeys(signer.JWKS()))
 	h.srv = httptest.NewServer(mux)
@@ -264,5 +278,32 @@ func TestCursorCodec(t *testing.T) {
 	buf.WriteString(s)
 	if _, err := c.Decode("T1", buf.String()+"A"); err == nil {
 		t.Error("a modified signature must be rejected")
+	}
+}
+
+func TestSnapshotTTLs(t *testing.T) {
+	mr := miniredis.RunT(t)
+	s := NewSnapshots(redis.NewClient(&redis.Options{Addr: mr.Addr()}))
+	ctx := context.Background()
+	item := []SnapshotItem{{ID: "p1", Score: 1}}
+	for _, tc := range []struct {
+		key  string
+		snap Snapshot
+		ttl  time.Duration
+	}{
+		{"full", Snapshot{Items: item}, SnapshotTTL},
+		{"degraded", Snapshot{Items: item, Degraded: true}, degradedTTL},
+		{"degraded-empty", Snapshot{Degraded: true}, 0},
+		{"empty", Snapshot{}, SnapshotTTL},
+	} {
+		if err := s.Put(ctx, "T1", tc.key, &tc.snap); err != nil {
+			t.Fatal(err)
+		}
+		if got := mr.TTL(snapKey("T1", tc.key)); got != tc.ttl {
+			t.Errorf("%s: ttl = %v, want %v", tc.key, got, tc.ttl)
+		}
+	}
+	if _, ok, _ := s.Get(ctx, "T1", "degraded-empty"); ok {
+		t.Error("a degraded empty result must not be cached")
 	}
 }

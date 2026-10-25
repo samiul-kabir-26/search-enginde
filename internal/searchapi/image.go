@@ -66,7 +66,7 @@ func (s *Service) handleImageSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, ok := s.resolve(ctx, w, p)
+	res, ok := s.resolve(ctx, w, r, p)
 	if !ok {
 		return
 	}
@@ -198,7 +198,7 @@ func (s *Service) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		}
 		size = n
 	}
-	res, ok := s.resolve(ctx, w, p)
+	res, ok := s.resolve(ctx, w, r, p)
 	if !ok {
 		return
 	}

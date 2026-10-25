@@ -9,13 +9,13 @@ similar-item search through a pluggable six-stage pipeline, with per-tenant BYO 
 ## Prerequisites
 
 Docker with Compose v2, GNU Make, Go (any version ≥ 1.21; the pinned 1.27.3 toolchain downloads
-automatically), Node 24, Python 3.12, and `curl`.
+automatically), Node 24, Python 3.12, `curl` and `jq`.
 
 ## Quick start
 
 ```bash
 make setup            # pinned Go tools → ./bin, tools/.venv, web deps, ONNX Runtime
-make up               # infra: MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse, SeaweedFS (S3)
+make up               # infra: MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse, SeaweedFS (S3), Mailpit
 make migrate
 make run-search-api   # http://localhost:8080/healthz
 make run-control-api  # http://localhost:8081/healthz
@@ -54,6 +54,25 @@ curl -s "localhost:8080/v1/products/abo:B000FTHD9W/similar?size=8" -H "Authoriza
 make eval             # image eval: recall@10/50, MRR -> tools/eval/reports/
 ```
 
+### Control plane: sign-up, config versions, activation (M4)
+
+```bash
+make seed             # also creates the platform admin from PLATFORM_ADMIN_EMAIL / PLATFORM_ADMIN_PASSWORD
+curl -s -c jar localhost:8081/v1/signup -H 'Idempotency-Key: k1' -d '{"company_name":"Acme","slug":"acme",
+  "region":"local","plan":"growth","email":"owner@acme.test","password":"correct horse battery staple"}'
+open http://localhost:8025   # Mailpit: the verification link (POST its token to /v1/auth/verify-email)
+ADMIN=$(curl -s localhost:8081/v1/admin/login -d '{"email":"admin@example.com","password":"change-me-admin-password"}' | jq -r .access_token)
+T=$(curl -s localhost:8081/v1/admin/tenants -H "Authorization: Bearer $ADMIN" | jq -r '.items[]|select(.slug=="demo").id')
+curl -s localhost:8081/v1/tenants/$T/config/draft -H "Authorization: Bearer $ADMIN"            # edit, then PUT it back
+curl -s -X POST localhost:8081/v1/tenants/$T/config/versions -H "Authorization: Bearer $ADMIN"   # publish → {"version":N}
+curl -s -X POST localhost:8081/v1/tenants/$T/config/versions/N/activate -H "Authorization: Bearer $ADMIN"
+```
+
+search-api picks up an activation within milliseconds (Redis pub/sub, plus a 30 s reconcile), with no restart.
+`POST /v1/tenants/{tid}/playground/search` with `"config_version":"draft"` tries a draft first, and
+`.../config/versions/N/shadow` with `{"sample_rate":0.1}` logs the comparisons to ClickHouse `shadow_results`.
+`docs/API.md` §2 lists every endpoint.
+
 Product data comes from [Amazon Berkeley Objects](https://amazon-berkeley-objects.s3.amazonaws.com/index.html)
 (CC BY 4.0, credit Amazon.com); see `tools/dataprep/ATTRIBUTION.md`.
 
@@ -66,6 +85,7 @@ Product data comes from [Amazon Berkeley Objects](https://amazon-berkeley-object
 | Redpanda (Kafka) | 19092 |
 | ClickHouse | 8123 (HTTP), 9000 (native) |
 | SeaweedFS S3 | 9100 |
+| Mailpit (SMTP / UI) | 1025 / 8025 |
 | Triton (`make up-models`) | 8000, 8001, 8002 |
 | Indexer (`make run-indexer`) | 8082 (health, metrics) |
 | Jaeger / Prometheus / Grafana (`make up-obs`) | 16686 / 9090 / 3001 |

@@ -130,6 +130,7 @@ type fakeSource struct {
 	loads   int
 	tenant  Tenant
 	version int
+	shadow  int
 	err     error
 }
 
@@ -138,6 +139,29 @@ func (f *fakeSource) Plan(context.Context, string) (Plan, error) { return growth
 func (f *fakeSource) ActiveConfig(context.Context, ID) (int, *Config, error) {
 	c, err := ParseConfig(DefaultDocument())
 	return f.version, c, err
+}
+func (f *fakeSource) ShadowConfig(context.Context, ID) (int, float64, *Config, error) {
+	if f.shadow == 0 {
+		return 0, 0, nil, ErrNotFound
+	}
+	c, err := ParseConfig(DefaultDocument())
+	return f.shadow, 0.1, c, err
+}
+func (f *fakeSource) ConfigVersion(_ context.Context, _ ID, v int) (*Config, error) {
+	if v > f.version {
+		return nil, ErrNotFound
+	}
+	return ParseConfig(DefaultDocument())
+}
+func (f *fakeSource) Draft(context.Context, ID) (*Config, error) {
+	return ParseConfig(DefaultDocument())
+}
+func (f *fakeSource) LiveVersions(context.Context) ([]LiveVersion, error) {
+	out := []LiveVersion{{Tenant: "T", Version: f.version}}
+	if f.shadow > 0 {
+		out = append(out, LiveVersion{Tenant: "T", Version: f.shadow, Shadow: true, Rate: 0.1})
+	}
+	return out, nil
 }
 
 func TestResolverCachesAndInvalidates(t *testing.T) {
@@ -193,5 +217,45 @@ func TestImageBudgets(t *testing.T) {
 	got = codes(c.Validate(context.Background(), ValidationDeps{Plan: growth, PlatformEmbedder: platformModels}))
 	if got["/budgets/image/total_ms"] != "exceeds_plan" {
 		t.Errorf("image total above the plan maximum must fail: %v", got)
+	}
+}
+
+func TestResolverShadowPinnedAndReconcile(t *testing.T) {
+	src := &fakeSource{tenant: Tenant{ID: "T", Plan: "growth", Status: "active"}, version: 2, shadow: 3}
+	r := NewResolver(src, time.Hour)
+	ctx := context.Background()
+	res, err := r.Get(ctx, "T")
+	if err != nil || res.Shadow == nil || res.Shadow.ConfigVersion != 3 || res.ShadowRate != 0.1 {
+		t.Fatalf("shadow not resolved: %+v %v", res, err)
+	}
+	if a, sh, rate, ok := r.Cached("T"); !ok || a != 2 || sh != 3 || rate != 0.1 {
+		t.Errorf("cached = %d %d %v %v", a, sh, rate, ok)
+	}
+	if stale, err := r.Reconcile(ctx); err != nil || len(stale) != 0 {
+		t.Errorf("nothing changed, nothing is stale: %v %v", stale, err)
+	}
+	src.version, src.shadow = 3, 0
+	stale, _ := r.Reconcile(ctx)
+	if len(stale) != 1 {
+		t.Fatalf("activation of v3 must be reconciled: %v", stale)
+	}
+	res, _ = r.Get(ctx, "T")
+	if res.ConfigVersion != 3 || res.Shadow != nil {
+		t.Errorf("after reconcile = v%d shadow %v", res.ConfigVersion, res.Shadow)
+	}
+
+	pinned, err := r.Pinned(ctx, "T", "2")
+	if err != nil || pinned.ConfigVersion != 2 || pinned.Draft {
+		t.Errorf("pinned v2 = %+v %v", pinned, err)
+	}
+	draft, err := r.Pinned(ctx, "T", "draft")
+	if err != nil || !draft.Draft || draft.ConfigVersion != 0 {
+		t.Errorf("draft = %+v %v", draft, err)
+	}
+	if _, err := r.Pinned(ctx, "T", "9"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown version: %v", err)
+	}
+	if _, err := r.Pinned(ctx, "T", "x"); err == nil {
+		t.Error("a bad reference must fail")
 	}
 }

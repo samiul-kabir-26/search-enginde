@@ -9,7 +9,20 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M3 is done** (M0–M2 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M4 is done** (M0–M3 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M4 verification (2026-10-25, same laptop, against the running stack):
+
+| Check | Result |
+|---|---|
+| Acceptance: activation → search changes | e2e test (`internal/e2e`, real MySQL + Redis, control-api and search-api in one process): **v2 served 5–11 ms after the activate call**. Live: v{n} with a brand-only always_filter served **226–279 ms** after activation, which includes the new version's first full pipeline run; no restart |
+| Sign-up and auth (live) | Sign-up 201 with the refresh cookie; an Idempotency-Key replay returns the same tenant; activation before email verification is refused (403); the verification mail arrives in Mailpit and its token verifies; refresh rotation returns `email_verified=true`; platform admin login from `make seed`; first signing key generated at control-api start |
+| Config lifecycle (live) | Draft edit, playground search on the draft (trace included, only the filtered brand returned), publish, activate, roll back by re-activating v1, draft restored |
+| Index job from an upload (live) | New tenant: presigned JSONL upload of 200 products, publish, job claimed by the indexer: **succeeded in 63–69 s**, 200/200, index v1; activated; a new API key's search returns only uploaded products |
+| Shadow (live) | Demo v2 as shadow at 20%: 100 fresh queries wrote **19–20 comparison rows** to ClickHouse `shadow_results` (overlap@10, both latencies). One run made while the integration suite was starting its containers had every shadow run degraded (budget timeouts on the loaded laptop); the rerun had 0 degraded |
+| Isolation | Another tenant's token gets 404 on `/v1/tenants/{tid}/...` (no tenant probing); role scopes enforced (integration test) |
+| Tests | Integration tests for every control-plane flow (sign-up, login, refresh reuse detection, verification, users and roles, API keys and token exchange, config lifecycle, idempotency, onboarding through go-live, admin settings/plans/key rotate and revoke, playground proxy, uploads), all passing with `-race`. `make cover` 80.9% (pipeline, stages, tenant); controlplane 68%, security 87%, registry 61% on their own tests. `make lint` clean; `control.yaml` passes Redocly; TS client regenerated and the web app typechecks |
+| Environment note | `make test-integration` starts every package's testcontainers at once; with the whole stack running and swap full, MySQL and Redpanda containers missed their start deadlines (6 packages). The same packages pass when run one at a time (`go test -p 1 -tags integration`). The first queries right after a search-api restart can also blow the stage budgets while connections open (**D38**) |
 
 M3 verification (2026-10-25, same laptop):
 
@@ -87,6 +100,17 @@ M0 verification:
 | D26 | The image category vote falls back up the category path when no leaf reaches 15% | ABO's 1,336 fine leaf categories made leaf-only votes empty for most queries (91% now get categories). |
 | D27 | Similar items returns at most `size` results without snapshot or cursor | The spec defines only `size`; similar lists are short and cheap (22 ms). |
 | D22 | The tenant attribute dictionary is a new optional `query.attributes` section; facets are a new optional `facets` section; `retrieval.ef` is optional | The spec named the features but not where their config lives. |
+| D28 | JWT signing keys live in MySQL `signing_keys`, private keys sealed with AES-256-GCM under `SECRETS_MASTER_KEY` (kid as AAD); rotation and revocation hold a MySQL advisory lock; `JWT_SIGNING_KEY`/`JWT_TTL` env vars are gone | Every control-api replica signs with the same active key, rotation needs no redeploy, and the admin can revoke a key (**R7**) |
+| D29 | Console sessions: 15 min access token in the body plus an opaque refresh token (sha256 stored) in the `se_refresh` cookie, rotated on every use; reusing a rotated token revokes the family | Standard rotation with theft detection; the cookie is HttpOnly and SameSite=Strict, `Secure` outside dev |
+| D30 | Activation (config activate and onboarding go-live) requires a verified email; platform admins are exempt | Stops unverified sign-ups from going live; R7 asked for verification but not where it gates |
+| D31 | A token for another tenant gets 404, not 403, on `/v1/tenants/{tid}/...` | Tenant IDs cannot be probed |
+| D32 | The playground calls search-api through a control-api proxy with a one-minute `search:playground` token; only that scope makes search-api honour `X-Config-Version` (version or `draft`), and playground runs force explain and skip snapshots and shadow | Keeps draft and version pinning out of the public data-plane contract; the console never holds a search token |
+| D33 | Shadow runs only on fresh pipeline runs (not snapshot hits), on a bounded worker pool (`SHADOW_WORKERS`, default 8) that drops instead of queueing; rows are batched to ClickHouse (1 s or 500 rows) and the top 10 of each side is stored | Shadow load stays proportional to real pipeline work and can never slow or fail the primary request (**R8**) |
+| D34 | `TENANT_CONFIG_TTL` default 30 s → 10 min: Redis pub/sub is the primary invalidation, the 30 s reconcile against MySQL is the fallback, the TTL is only a backstop | M2's short TTL was the stop-gap that M4's propagation replaces; fewer MySQL reads per instance |
+| D35 | Mailpit v1.31.6 in Compose (SMTP 1025, UI 8025) for verification mail | Dev SMTP with an HTTP API the tests and smoke scripts read |
+| D36 | Index jobs are queued in `index_jobs` by control-api and run by the indexer (`FOR UPDATE SKIP LOCKED`); uploads are JSONL in the tenant's own shape, published as catalog events and then backfilled into `v{n+1}` | One indexing path for streamed and uploaded data, and the indexer already owns embedding and alias swaps |
+| D37 | Onboarding accepts only what exists today: BYO embedders and stores return `byo_unavailable` until M5, learned and BYO ranking `not_available` until M7, CEL rules are saved with a `deferred` warning until M7; retrieval presets are balanced, keyword, semantic and visual | Steps validate against real capabilities instead of accepting config that cannot run |
+| D38 | A degraded result with no items is not snapshotted, and an activation prebuilds the new version's providers | Found in the live smoke test: the first queries after a search-api restart timed out while connections opened, and the empty degraded result was then served from the snapshot for 30 s. A startup warm-up is carried forward |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
 ### Resolved questions (answered 2026-10-25)
@@ -289,22 +313,26 @@ Carried forward: load and isolation testing on dedicated hardware (M10), where b
 
 ---
 
-## M4 — control-api: sign-up, config lifecycle, propagation
+## M4 — control-api: sign-up, config lifecycle, propagation ✅
 
-**Done when:** activating a new version changes search behavior within 5 s, without a restart.
+**Done when:** activating a new version changes search behavior within 5 s, without a restart. **Met: 5 ms in the e2e test, 226–279 ms live (including the new version's first pipeline run).**
 
-- [ ] Auth: sign-up (tenant, owner, default draft, onboarding state), login (argon2id), email verification (Mailpit in Compose), users and roles, API keys (shown once, hashed), `POST /v1/auth/token`, session refresh rotation, Ed25519 key rotation and JWKS (**R7**)
-- [ ] Platform admin: `platform_admins` and `platform_settings` tables, `platform:admin` scope, `/v1/admin/*` (settings with bounds, plans CRUD, key rotate/revoke, tenant list), `platform.settings.changed` pub/sub, bootstrap admin in `cmd/seed` (**R3**, **R7**)
-- [ ] Idempotency-Key middleware: Redis `idem:{tid}:{key}`, 24 h, replay on match, 422 on body mismatch (**R8**)
-- [ ] Config: draft GET/PUT, validate (returns every error), publish (immutable, monotonic version), activate, shadow (0–20%), diff
-- [ ] Propagation: Redis pub/sub `tenant.config.activated` → search-api invalidation; 30 s reconcile loop; old-version provider drain
-- [ ] `internal/registry`: `(kind, type)` factories, `Deps`, LRU per `(tenant, version, stage)` with close on eviction or supersede
-- [ ] Shadow execution on sampled traffic (results logged to ClickHouse `shadow_results`, never returned; **R8**)
-- [ ] Onboarding: state machine, `PUT /onboarding/steps/{step}` validation per `docs/ONBOARDING.md` §4, engine-explainer endpoints
-- [ ] Catalog mapping preview, catalog upload presign, index jobs (build `v{n+1}`, alias swap, progress)
-- [ ] Playground search (draft or version, explain on)
-- [ ] Fill in `control.yaml` request/response schemas for every endpoint touched; regenerate the TS client
-- [ ] Integration test: activate v2 → behavior changes within 5 s
+- [x] Auth: sign-up (tenant, owner, default draft, onboarding state; idempotent), login (argon2id, PHC strings, rehash on login when parameters change), email verification (Mailpit in Compose, **D35**), users and roles (owner, admin, developer, viewer → `tenant:read|write|admin`), API keys (shown once, hashed), `POST /v1/auth/token`, refresh rotation with reuse detection (**D29**), Ed25519 key ring with rotation, revocation and JWKS (**D28**, **R7**)
+- [x] Platform admin: `platform_admins` and `platform_settings` tables (migration 000003), `platform:admin` scope (token without `tid`), `/v1/admin/*` (settings with R7 bounds, plans list/upsert, signing keys list/rotate/revoke, tenant list), `platform.settings.changed` pub/sub, bootstrap admin in `cmd/seed` from `PLATFORM_ADMIN_EMAIL`/`PLATFORM_ADMIN_PASSWORD` (**R3**, **R7**)
+- [x] Idempotency-Key middleware: Redis `idem:{scope}:{key}` (scope = tenant, or `signup`), 24 h, replay on match, 422 on body mismatch, 409 while the first request runs (**R8**)
+- [x] Config: draft GET/PUT (saved even when invalid, validation returned), validate (every error), publish (immutable, monotonic under `SELECT … FOR UPDATE`), activate (needs a verified email, **D30**), shadow (0–20%, 0 clears), diff (JSON Pointer changes)
+- [x] Propagation: Redis pub/sub `tenant.config.activated` → resolver invalidation in search-api; 30 s reconcile against MySQL; superseded providers drain for 30 s, then close; the new version's providers are built ahead of traffic (**D34**, **D38**)
+- [x] `internal/registry`: `(kind, type)` factories, `Deps`, LRU per `(tenant, version, role)` with close on eviction or supersede after the drain grace, time-sensitive entries (centroids) refreshed
+- [x] Shadow execution on sampled fresh pipeline runs, bounded worker pool, batched into ClickHouse `shadow_results` (migration 000002, 90-day TTL), never returned (**D33**, **R8**)
+- [x] Onboarding: state machine (in-order unlock, revisit allowed, `use_defaults`), per-step validation that edits the draft, presets, go-live creates the first API key; engine explainer (base and tenant with Default/Custom badges) (**D37**)
+- [x] Catalog mapping preview, presigned JSONL upload, index jobs run by the indexer (upload → catalog events → backfill `v{n+1}` → alias swap; progress, status) (**D36**)
+- [x] Playground search, text and image (draft or a version, explain forced) through a control-api proxy (**D32**)
+- [x] `control.yaml` request/response schemas for every M4 endpoint; TS client regenerated
+- [x] Integration tests: control-plane flows on MySQL + Redis; e2e "activate v2 → search changes within 5 s" (`internal/e2e`)
+
+Carried forward: the admin and tenant console UIs (M9 builds the onboarding wizard on these endpoints); a startup warm-up for search-api, because the very first queries after a restart can exceed the stage budgets while gRPC/HTTP connections open (now they are no longer cached when empty, **D38**); BYO stores, embedders and models (M5, M7); CEL policies (M7).
+
+New deps: `golang.org/x/crypto/argon2`, `clickhouse-go/v2` (moved into search-api), `alicebob/miniredis/v2` (tests), testcontainers Redis module.
 
 ---
 

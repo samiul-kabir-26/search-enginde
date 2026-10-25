@@ -115,6 +115,13 @@ The goal is a learnable ranking signal, not noise.
 
 **Index versions.** The indexer creates and promotes `v1` on a tenant's first event. `indexer -backfill -tenant <slug>` rebuilds into `v{n+1}` from the start of the topic, checks that both stores hold exactly the live products, swaps both aliases, and drops versions older than the previous one.
 
+**Index jobs and uploads (M4).** control-api queues a job in `index_jobs`: `POST /index/jobs`, or the onboarding `index_build` step. Any indexer replica claims the oldest queued job with `SELECT … FOR UPDATE SKIP LOCKED`, then:
+1. For an upload job, it reads the tenant's JSONL from the uploads bucket (`uploads/{tenant}/{upload_id}.jsonl`, written through a 15-minute presigned PUT). Each line is one product in the tenant's own shape. Lines are published to `catalog.product.v1` as upserts in batches of 500, with the publish time as `source_version`, so an upload supersedes older data for the same products. Each line is first mapped with the job version's `catalog.field_mapping`; lines that fail mapping or validation are counted as failed and not published.
+2. It backfills `v{n+1}` with the job's config version (same procedure as `-backfill`), recording progress in `total`, `done` and `failed`.
+3. It verifies counts, swaps both aliases, and marks the job `succeeded` with its `index_version`, or `failed` with the error.
+
+Measured locally: 200 uploaded products for a new tenant were indexed and searchable in about 65 s, most of it the backfill's catch-up wait.
+
 The data-prep scripts do not compute embeddings, so indexing and query use the same embedding path.
 
 **Text embedding input:** `"{title}. {brand}. {category leaf}. {attributes k:v joined}"`, truncated per tokenizer limits by the model server.
