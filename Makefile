@@ -19,6 +19,7 @@ REDOCLY_VERSION       := 2.71.0
 
 COMPOSE := docker compose --project-directory . -f deploy/docker-compose.yml --env-file .env
 ENV_LOAD := set -a; source .env; set +a;
+UV_RUN := uv run --frozen --all-groups
 
 SERVICES := search-api control-api indexer featurejob seed
 
@@ -74,7 +75,7 @@ up: .env ## Start infrastructure, wait until healthy, create topics and buckets
 .PHONY: init
 init: ## Create Kafka topics and S3 buckets (idempotent)
 	$(COMPOSE) run --rm redpanda-init
-	$(COMPOSE) run --rm minio-init
+	$(COMPOSE) run --rm s3-init
 
 .PHONY: up-models
 up-models: .env ## Start infrastructure plus Triton (large image; needed from M1)
@@ -161,11 +162,28 @@ run-search-api: .env ## Run search-api locally against the Compose stack
 run-control-api: .env ## Run control-api locally against the Compose stack
 	@$(ENV_LOAD) go run ./cmd/control-api
 
+.PHONY: run-indexer
+run-indexer: .env ## Run the streaming indexer (consumer group) against the Compose stack
+	@$(ENV_LOAD) go run ./cmd/indexer
+
+.PHONY: backfill
+backfill: .env ## Rebuild a tenant index from the catalog topic and swap aliases (TENANT=demo)
+	@$(ENV_LOAD) go run ./cmd/indexer -backfill -tenant $(or $(TENANT),demo)
+
 ##@ Data, eval and load
 
 .PHONY: data
-data: ## Build data/ from the downloaded ABO archives (M1)
-	cd tools && uv run python -m dataprep.select --seed 42
+data: ## Download ABO metadata and the selected images, then build data/ (deterministic, seed 42)
+	cd tools && $(UV_RUN) python -m dataprep.select --seed 42
+	cd tools && $(UV_RUN) python -m dataprep.synthesize --seed 42
+
+.PHONY: models
+models: ## Export CLIP and BGE to ONNX into the Triton model repository (parity-checked)
+	cd tools && $(UV_RUN) python -m models.export
+
+.PHONY: models-smoke
+models-smoke: ## Smoke-test the Triton embedders (needs `make up-models`)
+	cd tools && $(UV_RUN) python -m models.smoke
 
 .PHONY: seed
 seed: .env ## Publish the dataset as catalog events and create the demo tenant (M1)
@@ -173,7 +191,7 @@ seed: .env ## Publish the dataset as catalog events and create the demo tenant (
 
 .PHONY: eval
 eval: ## Run offline eval suites against the running stack (M10)
-	cd tools && uv run python -m eval.run
+	cd tools && $(UV_RUN) python -m eval.run
 
 .PHONY: loadtest
 loadtest: ## Run k6 load tests (M10)

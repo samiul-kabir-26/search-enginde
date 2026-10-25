@@ -18,23 +18,33 @@
 
 ABO (Amazon Berkeley Objects) provides product listings with multilingual metadata and catalog images.
 
-**License.** CC BY-NC 4.0. That is non-commercial: it is acceptable for development and evaluation, but it must not be used as production tenant data. Keep the attribution file in `tools/dataprep/ATTRIBUTION.md`.
+**License.** CC BY 4.0 (relicensed from CC BY-NC 4.0; confirmed on the official page and README on 2026-10-25). Attribution is required. It is still demo data only: it is never used as production tenant data. Keep the attribution file in `tools/dataprep/ATTRIBUTION.md`.
 
-**Downloads.** Download from the official ABO page (`https://amazon-berkeley-objects.s3.amazonaws.com/index.html`):
-- the listings archive, which is gzipped JSON lines;
-- the small images archive plus its `images.csv.gz` metadata (`image_id`, `height`, `width`, `path`).
+**Downloads.** From the official ABO bucket (`https://amazon-berkeley-objects.s3.amazonaws.com/index.html`), done by `make data` (`tools/dataprep/download.py`):
+- `archives/abo-listings.tar` (83 MiB): `listings/metadata/listings_{0-9a-f}.json.gz`, gzipped JSON lines;
+- `images/metadata/images.csv.gz` (6 MiB): `image_id,height,width,path`;
+- only the selected small images, fetched one by one from `images/small/{path}`. The 3 GiB `archives/abo-images-small.tar` is optional: `select.py` reads from it when it is present in `data/raw/abo/`, otherwise ~11K images (~85 MB) are downloaded in parallel. The bucket is slow per connection, so large files are fetched as parallel byte ranges.
 
-**Verify before writing the parser.** Confirm the actual archive names, the field names and the presence or absence of fields by inspecting the files first. The expected listing fields include `item_id`, `item_name` (a list of `{language_tag, value}`), `brand`, `product_type`, `main_image_id`, `other_image_id`, `color`, `material`, `bullet_point`, `item_keywords` and `node` (category path). ABO does not provide price, stock or seller; those are synthesized (§4).
+**Verified field names** (inspected 2026-10-25; 147,702 listings). Every listing has `item_id`, `item_name`, `product_type`, `country`, `marketplace` and `domain_name`; most have `brand`, `main_image_id`, `node`, `other_image_id`, `bullet_point`, `item_keywords` and `color`; about a third have `material`.
+- Localized fields are lists of `{language_tag, value}`; `color` items also carry `standardized_values`.
+- `product_type` is a list `[{value}]`, not a string.
+- `node` is a list of `{node_id, node_name}`, where `node_name` is the category path as a string such as `/Categories/Furniture/Living Room Furniture`. Non-English marketplaces use localized roots (`/Categorías/...`).
+- A listing is unique per (`item_id`, `domain_name`); the same item can appear on several marketplaces.
+- ABO does not provide price, stock or seller; those are synthesized (§4).
 
 ## 3. Subset selection (`tools/dataprep/select.py`)
 
 Run deterministically with `--seed 42`.
 
-1. Keep items with an `en_US` (fallback `en_*`) `item_name`, a non-null `main_image_id`, and a `node` category path.
-2. Deduplicate on normalized title plus brand.
+1. Keep items with an `en_US` (fallback `en_*`) `item_name`, a `main_image_id` present in `images.csv.gz`, a `product_type`, and a `node` path under the English root `/Categories/` (the root segment is dropped from `category_path`).
+2. Deduplicate on `item_id`, on normalized title plus brand, and on `main_image_id` (size and colour variants often share one photo). Among duplicates, items with alternates and `amazon.com` listings win.
 3. Stratify by `product_type`, capping each type at 400 items. Drop types with fewer than 20 items.
-4. Target 10,000 items. Prefer items with at least one `other_image_id`, because they are needed for image eval (§7).
-5. Write `data/products.raw.jsonl` and copy the referenced images to `data/images/` (MinIO bucket `catalog-images` at seed time).
+4. Target 10,000 items: every remaining type gets the same quota (water-filling), and items with at least one `other_image_id` are preferred within a type because image eval needs them (§7).
+5. Choose 1,200 eval products and one alternate image each. An eval image is never another product's main image and never shared between eval products.
+6. Write `data/products.raw.jsonl` and `data/eval/image_eval_seed.jsonl`; `data/images/` holds exactly the main images and `data/images/alt/` the eval images (uploaded to the S3 bucket `catalog-images` at seed time).
+7. Record parameters, row counts and sha256 for every output in `data/MANIFEST.json`.
+
+On the 2026-10-25 data this selects 10,000 of 91,352 candidates across 162 product types.
 
 ## 4. Canonical product schema (`internal/catalog`)
 
@@ -58,7 +68,7 @@ Run deterministically with `--seed 42`.
 | `status` | keyword | yes | `active` (98%), `inactive` |
 | `rating` | float | yes | Synthetic, correlated with the hidden quality q |
 | `rating_count` | int32 | no | |
-| `image_urls` | keyword[] | no | MinIO URLs |
+| `image_urls` | keyword[] | no | S3 URLs (public images bucket) |
 | `listing_completeness` | float | no | Computed: share of populated optional fields |
 | `created_at` | timestamp | yes | Synthetic, within the last 2 years |
 
@@ -91,6 +101,15 @@ The goal is a learnable ranking signal, not noise.
 1. maps each product to the canonical schema;
 2. embeds it via the tenant's configured embedders;
 3. upserts to Qdrant and OpenSearch.
+
+**Catalog event envelope (`catalog.product.v1`).**
+- Key `{tenant_id}:{product_id}`, so one product's changes share a partition and stay ordered. Headers: `tenant-id`, `event-id`, `op`, `schema-version` (`1`); when present they must match the body.
+- Value: `{event_id, tenant_id, product_id, op: "upsert"|"delete", ts, source_version, product}`. `product` is the tenant's own JSON, mapped through `catalog.field_mapping` and `catalog.custom_fields`; its mapped `product_id` must equal the envelope's.
+- A Kafka tombstone (null value) for a key is a delete.
+- `source_version` orders changes to one product. OpenSearch is the arbiter: writes use `version_type=external_gte`, so an older version is rejected as stale (and then skipped for Qdrant too) while an equal version re-applies, making replays idempotent. `source_version: 0` (and tombstones) apply unconditionally.
+- Events that fail mapping or validation are logged and counted as invalid, never retried; store or model failures retry the batch with backoff (at-least-once).
+
+**Index versions.** The indexer creates and promotes `v1` on a tenant's first event. `indexer -backfill -tenant <slug>` rebuilds into `v{n+1}` from the start of the topic, checks that both stores hold exactly the live products, swaps both aliases, and drops versions older than the previous one.
 
 The data-prep scripts do not compute embeddings, so indexing and query use the same embedding path.
 

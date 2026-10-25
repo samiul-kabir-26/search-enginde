@@ -1,0 +1,10 @@
+name: "bge_encoder"
+backend: "onnxruntime"
+max_batch_size: 64
+input [
+  { name: "input_ids", data_type: TYPE_INT64, dims: [ -1 ] },
+  { name: "attention_mask", data_type: TYPE_INT64, dims: [ -1 ] }
+]
+output [ { name: "EMBEDDING", data_type: TYPE_FP32, dims: [ 384 ] } ]
+instance_group [ { kind: KIND_CPU, count: 1 } ]
+dynamic_batching { max_queue_delay_microseconds: 2000 }

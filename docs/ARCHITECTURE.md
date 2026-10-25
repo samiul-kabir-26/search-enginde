@@ -10,7 +10,7 @@
 | `featurejob` | Data | Aggregates ClickHouse events into Redis online features on a schedule. |
 | `seed` | Dev | Publishes the prepared dataset as catalog events and creates the `demo` tenant. |
 
-Infrastructure: MySQL (control plane), Redis (config invalidation, features, rate limits, ad pacing), OpenSearch, Qdrant, Kafka/Redpanda, ClickHouse, Triton, MinIO.
+Infrastructure: MySQL (control plane), Redis (config invalidation, features, rate limits, ad pacing), OpenSearch, Qdrant, Kafka/Redpanda, ClickHouse, Triton, S3 object storage (SeaweedFS in dev).
 
 ## 2. Request flow (`search-api`)
 
@@ -78,6 +78,8 @@ type AdsBlender interface {
 	Blend(ctx context.Context, q *Query, organic []Candidate) ([]Slot, error)
 }
 ```
+
+As implemented in M1, `LexicalIndex.Upsert` and `Delete` take source-versioned documents and return the product IDs rejected as stale, because the lexical index arbitrates catalog event order (`docs/DATA.md` §6). Platform stores also implement `IndexVersions` (`Active`, `Latest`, `Create`, `Promote`, `Count`, `Drop`) for the alias-swap re-index. `Search` is added to both store interfaces with retrieval in M2.
 
 `Filter` (the request-level structured filter) is not an interface. It is a typed AST (`FilterExpr`) that each `VectorStore` and `LexicalIndex` adapter translates into its native filter: Qdrant payload filter, OpenSearch `bool.filter`, or a SQL `WHERE` for pgvector. Pushdown is mandatory; post-filtering structured constraints is a bug.
 

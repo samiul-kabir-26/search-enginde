@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "locale": "en",
+  "budgets": { "total_ms": 300, "s1_ms": 40, "s2_ms": 80, "s3_ms": 10, "s4_ms": 15, "s5_ms": 80, "s6_ms": 30 },
+
+  "catalog": {
+    "ingestion": "events",
+    "field_mapping": {
+      "product_id": "$.id",
+      "title": "$.name",
+      "description": "$.description",
+      "category_path": "$.category.path",
+      "brand": "$.brand",
+      "product_type": "$.product_type",
+      "price_minor": "$.price.amount_minor",
+      "currency": "$.price.currency",
+      "image_urls": "$.images[*].url",
+      "vendor_id": "$.vendor.id",
+      "attributes": "$.attributes",
+      "moq": "$.moq",
+      "stock": "$.inventory.stock",
+      "ship_regions": "$.shipping.regions",
+      "status": "$.status",
+      "rating": "$.reviews.rating",
+      "rating_count": "$.reviews.count",
+      "created_at": "$.created_at"
+    },
+    "custom_fields": []
+  },
+
+  "embedders": {
+    "text":  { "provider": "platform", "model": "bge-small-en-v1.5" },
+    "image": { "provider": "platform", "model": "clip-vit-b32" }
+  },
+
+  "stores": {
+    "lexical": { "provider": "platform" },
+    "vector":  { "provider": "platform" }
+  },
+
+  "retrieval": {
+    "text":  { "retrievers": [ { "name": "lexical_bm25", "k": 500, "weight": 1.0 }, { "name": "vector_text", "k": 500, "weight": 1.0 }, { "name": "vector_text_to_image", "k": 200, "weight": 0.5 } ] },
+    "image": { "retrievers": [ { "name": "vector_image", "k": 500, "weight": 1.0 } ] },
+    "rrf_k": 60,
+    "field_boosts": { "title": 3.0, "brand": 2.0, "attributes": 1.5, "description": 1.0 }
+  },
+
+  "policy": {
+    "always_filters": [
+      { "field": "status", "op": "eq", "value": "active" },
+      { "field": "stock", "op": "gt", "value": 0 }
+    ],
+    "rules": []
+  },
+
+  "prerank": { "scorer": { "type": "default_linear" }, "keep": 300 },
+
+  "rank": {
+    "scorer": {
+      "type": "default_linear",
+      "weights": {
+        "rrf_score": 1.0, "bm25_norm": 0.4, "cosine_text": 0.6, "cosine_image": 0.6,
+        "ctr_7d": 0.3, "cvr_7d": 0.5, "rating": 0.2, "vendor_score": 0.3, "policy_boost": 1.0
+      }
+    },
+    "keep": 100
+  },
+
+  "rerank": {
+    "personalization": { "enabled": true, "alpha": 0.15, "beta": 0.05 },
+    "diversity": { "max_per_vendor": 2, "window": 10 }
+  },
+
+  "ads": {
+    "enabled": false,
+    "slots": [1, 5, 10],
+    "relevance_floor": 0.35,
+    "auction": "gsp"
+  }
+}

@@ -1,0 +1,111 @@
+# Lognormal price parameters per ABO product_type (docs/DATA.md §4).
+# price = median_usd * exp(sigma * N(0, 1)), rounded to cents and clamped to [min_usd, max_usd].
+# Types not listed use `default`.
+default: { median_usd: 25, sigma: 0.6 }
+min_usd: 0.99
+max_usd: 5000
+
+types:
+  # Furniture and large home items
+  BED: { median_usd: 450, sigma: 0.5 }
+  BED_FRAME: { median_usd: 320, sigma: 0.5 }
+  BEAN_BAG_CHAIR: { median_usd: 90, sigma: 0.5 }
+  BENCH: { median_usd: 140, sigma: 0.5 }
+  CABINET: { median_usd: 220, sigma: 0.6 }
+  CHAIR: { median_usd: 160, sigma: 0.6 }
+  DESK: { median_usd: 260, sigma: 0.6 }
+  DRESSER: { median_usd: 380, sigma: 0.5 }
+  FURNITURE: { median_usd: 200, sigma: 0.7 }
+  HEADBOARD: { median_usd: 210, sigma: 0.5 }
+  HOME_FURNITURE_AND_DECOR: { median_usd: 80, sigma: 0.8 }
+  OTTOMAN: { median_usd: 120, sigma: 0.5 }
+  SHELF: { median_usd: 110, sigma: 0.6 }
+  SOFA: { median_usd: 750, sigma: 0.5 }
+  STOOL_SEATING: { median_usd: 95, sigma: 0.5 }
+  TABLE: { median_usd: 230, sigma: 0.6 }
+  OUTDOOR_LIVING: { median_usd: 140, sigma: 0.8 }
+  FREESTANDING_SHELTER: { median_usd: 260, sigma: 0.6 }
+  # Appliances and electronics
+  AIR_CONDITIONER: { median_usd: 420, sigma: 0.4 }
+  ELECTRIC_FAN: { median_usd: 60, sigma: 0.5 }
+  MAJOR_HOME_APPLIANCES: { median_usd: 550, sigma: 0.6 }
+  HEADPHONES: { median_usd: 45, sigma: 0.8 }
+  SPEAKERS: { median_usd: 70, sigma: 0.8 }
+  OFFICE_ELECTRONICS: { median_usd: 90, sigma: 0.8 }
+  INPUT_MOUSE: { median_usd: 25, sigma: 0.5 }
+  FLAT_SCREEN_DISPLAY_MOUNT: { median_usd: 40, sigma: 0.5 }
+  # Lighting
+  LAMP: { median_usd: 55, sigma: 0.6 }
+  LIGHT_FIXTURE: { median_usd: 120, sigma: 0.7 }
+  HOME_LIGHTING_AND_LAMPS: { median_usd: 70, sigma: 0.7 }
+  LIGHT_BULB: { median_usd: 12, sigma: 0.5 }
+  STRING_LIGHT: { median_usd: 20, sigma: 0.5 }
+  # Fashion, jewelry, bags
+  BOOT: { median_usd: 85, sigma: 0.5 }
+  SHOES: { median_usd: 60, sigma: 0.5 }
+  SANDAL: { median_usd: 35, sigma: 0.5 }
+  HANDBAG: { median_usd: 55, sigma: 0.6 }
+  WALLET: { median_usd: 30, sigma: 0.5 }
+  BACKPACK: { median_usd: 45, sigma: 0.5 }
+  LUGGAGE: { median_usd: 120, sigma: 0.5 }
+  SUITCASE: { median_usd: 140, sigma: 0.5 }
+  HAT: { median_usd: 20, sigma: 0.5 }
+  EYEWEAR: { median_usd: 35, sigma: 0.7 }
+  FINEEARRING: { median_usd: 180, sigma: 0.9 }
+  FINENECKLACEBRACELETANKLET: { median_usd: 220, sigma: 0.9 }
+  FINERING: { median_usd: 260, sigma: 0.9 }
+  FINEOTHER: { median_usd: 150, sigma: 0.9 }
+  EARRING: { median_usd: 20, sigma: 0.6 }
+  NECKLACE: { median_usd: 25, sigma: 0.6 }
+  BRACELET: { median_usd: 20, sigma: 0.6 }
+  # Grocery and consumables
+  BREAD: { median_usd: 4, sigma: 0.4 }
+  BREAKFAST_CEREAL: { median_usd: 5, sigma: 0.4 }
+  CAKE: { median_usd: 12, sigma: 0.5 }
+  COFFEE: { median_usd: 11, sigma: 0.5 }
+  COOKIE: { median_usd: 5, sigma: 0.4 }
+  CRACKER: { median_usd: 4, sigma: 0.4 }
+  DAIRY_BASED_CHEESE: { median_usd: 6, sigma: 0.4 }
+  DAIRY_BASED_CREAM: { median_usd: 4, sigma: 0.4 }
+  DAIRY_BASED_DRINK: { median_usd: 4, sigma: 0.4 }
+  DAIRY_BASED_ICE_CREAM: { median_usd: 6, sigma: 0.4 }
+  DRINK_FLAVORED: { median_usd: 6, sigma: 0.5 }
+  EDIBLE_OIL_VEGETABLE: { median_usd: 9, sigma: 0.5 }
+  FRUIT: { median_usd: 4, sigma: 0.5 }
+  GROCERY: { median_usd: 7, sigma: 0.6 }
+  HERB: { median_usd: 5, sigma: 0.5 }
+  JUICE_AND_JUICE_DRINK: { median_usd: 5, sigma: 0.4 }
+  LEGUME: { median_usd: 4, sigma: 0.4 }
+  NOODLE: { median_usd: 3, sigma: 0.4 }
+  PACKAGED_SOUP_AND_STEW: { median_usd: 3, sigma: 0.4 }
+  POULTRY: { median_usd: 9, sigma: 0.4 }
+  SALAD_DRESSING: { median_usd: 4, sigma: 0.4 }
+  SAUCE: { median_usd: 4, sigma: 0.4 }
+  SNACK_CHIP_AND_CRISP: { median_usd: 4, sigma: 0.4 }
+  SNACK_MIX: { median_usd: 6, sigma: 0.4 }
+  TEA: { median_usd: 7, sigma: 0.5 }
+  VEGETABLE: { median_usd: 3, sigma: 0.5 }
+  WATER: { median_usd: 6, sigma: 0.5 }
+  NUTRITIONAL_SUPPLEMENT: { median_usd: 22, sigma: 0.6 }
+  VITAMIN: { median_usd: 15, sigma: 0.5 }
+  # Office and paper
+  PRINT_COPY_PAPER: { median_usd: 12, sigma: 0.5 }
+  PAPER_PRODUCT: { median_usd: 10, sigma: 0.5 }
+  ENVELOPE: { median_usd: 9, sigma: 0.5 }
+  LABEL: { median_usd: 10, sigma: 0.5 }
+  FILE_FOLDER: { median_usd: 12, sigma: 0.5 }
+  WRITING_INSTRUMENT: { median_usd: 8, sigma: 0.6 }
+  WRITING_BOARD: { median_usd: 35, sigma: 0.6 }
+  # Kitchen
+  DUTCH_OVENS: { median_usd: 60, sigma: 0.5 }
+  SAUTE_FRY_PAN: { median_usd: 35, sigma: 0.5 }
+  FLATWARE: { median_usd: 30, sigma: 0.5 }
+  DISHWARE_PLACE_SETTING: { median_usd: 40, sigma: 0.5 }
+  DISHWARE_PLATE: { median_usd: 25, sigma: 0.5 }
+  DRINKING_CUP: { median_usd: 15, sigma: 0.6 }
+  # Hardware and tools
+  TOOLS: { median_usd: 30, sigma: 0.7 }
+  WRENCH: { median_usd: 18, sigma: 0.6 }
+  FAUCET: { median_usd: 85, sigma: 0.6 }
+  PLUMBING_FIXTURE: { median_usd: 70, sigma: 0.7 }
+  LOCK: { median_usd: 25, sigma: 0.6 }

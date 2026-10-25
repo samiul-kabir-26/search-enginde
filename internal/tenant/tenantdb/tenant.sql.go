@@ -7,7 +7,79 @@ package tenantdb
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 )
+
+const createConfigVersion = `-- name: CreateConfigVersion :exec
+INSERT INTO tenant_config_versions (id, tenant_id, version, document, schema_version, state, created_by)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+`
+
+type CreateConfigVersionParams struct {
+	ID            string                    `json:"id"`
+	TenantID      string                    `json:"tenant_id"`
+	Version       int32                     `json:"version"`
+	Document      json.RawMessage           `json:"document"`
+	SchemaVersion int32                     `json:"schema_version"`
+	State         TenantConfigVersionsState `json:"state"`
+	CreatedBy     sql.NullString            `json:"created_by"`
+}
+
+func (q *Queries) CreateConfigVersion(ctx context.Context, arg CreateConfigVersionParams) error {
+	_, err := q.db.ExecContext(ctx, createConfigVersion,
+		arg.ID,
+		arg.TenantID,
+		arg.Version,
+		arg.Document,
+		arg.SchemaVersion,
+		arg.State,
+		arg.CreatedBy,
+	)
+	return err
+}
+
+const createOnboardingState = `-- name: CreateOnboardingState :exec
+INSERT INTO onboarding_state (tenant_id, current_step, completed_steps)
+VALUES (?, ?, ?)
+`
+
+type CreateOnboardingStateParams struct {
+	TenantID       string          `json:"tenant_id"`
+	CurrentStep    string          `json:"current_step"`
+	CompletedSteps json.RawMessage `json:"completed_steps"`
+}
+
+func (q *Queries) CreateOnboardingState(ctx context.Context, arg CreateOnboardingStateParams) error {
+	_, err := q.db.ExecContext(ctx, createOnboardingState, arg.TenantID, arg.CurrentStep, arg.CompletedSteps)
+	return err
+}
+
+const createTenant = `-- name: CreateTenant :exec
+INSERT INTO tenants (id, slug, name, plan, region, status)
+VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type CreateTenantParams struct {
+	ID     string `json:"id"`
+	Slug   string `json:"slug"`
+	Name   string `json:"name"`
+	Plan   string `json:"plan"`
+	Region string `json:"region"`
+	Status string `json:"status"`
+}
+
+func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) error {
+	_, err := q.db.ExecContext(ctx, createTenant,
+		arg.ID,
+		arg.Slug,
+		arg.Name,
+		arg.Plan,
+		arg.Region,
+		arg.Status,
+	)
+	return err
+}
 
 const getActiveConfigVersion = `-- name: GetActiveConfigVersion :one
 SELECT id, tenant_id, version, document, schema_version, state, shadow_sample_rate, created_at, created_by FROM tenant_config_versions
@@ -102,4 +174,27 @@ func (q *Queries) ListActiveConfigVersions(ctx context.Context) ([]ListActiveCon
 		return nil, err
 	}
 	return items, nil
+}
+
+const upsertConfigDraft = `-- name: UpsertConfigDraft :exec
+INSERT INTO tenant_config_drafts (tenant_id, document, schema_version, updated_by)
+VALUES (?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE document = VALUES(document), schema_version = VALUES(schema_version), updated_by = VALUES(updated_by)
+`
+
+type UpsertConfigDraftParams struct {
+	TenantID      string          `json:"tenant_id"`
+	Document      json.RawMessage `json:"document"`
+	SchemaVersion int32           `json:"schema_version"`
+	UpdatedBy     sql.NullString  `json:"updated_by"`
+}
+
+func (q *Queries) UpsertConfigDraft(ctx context.Context, arg UpsertConfigDraftParams) error {
+	_, err := q.db.ExecContext(ctx, upsertConfigDraft,
+		arg.TenantID,
+		arg.Document,
+		arg.SchemaVersion,
+		arg.UpdatedBy,
+	)
+	return err
 }

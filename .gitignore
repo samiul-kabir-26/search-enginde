@@ -7,7 +7,7 @@
 /coverage.out
 /third_party/
 
-# Dataset (built by `make data`; ABO is CC BY-NC 4.0, never commit)
+# Dataset (downloaded and built by `make data`; never commit)
 /data/
 
 # Python
@@ -19,8 +19,10 @@ tools/.venv/
 
 # Model artifacts (exported by tools/models and tools/training)
 *.onnx
-deploy/triton/model_repository/*
-!deploy/triton/model_repository/.gitkeep
+deploy/triton/model_repository/*/1/*
+!deploy/triton/model_repository/*/1/model.py
+!deploy/triton/model_repository/*/1/.gitkeep
+deploy/triton/model_repository/SOURCES.json
 
 # Editors and OS
 .idea/

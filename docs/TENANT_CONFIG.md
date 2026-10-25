@@ -49,7 +49,10 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
       "image_urls": "$.images[*].url",
       "vendor_id": "$.vendor.id",
       "attributes": "$.attributes"
-    }
+    },
+    "custom_fields": [
+      { "name": "season", "type": "keyword", "source": "$.extra.season", "filterable": true, "facetable": true }
+    ]
   },
 
   "embedders": {
@@ -143,6 +146,8 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 "rerank": { "model": { "type": "kserve_v2", "model_id": "01J..." }, "diversity": { ... } }
 ```
 
+**Catalog mapping and custom fields** (PLAN.md R1). `field_mapping` maps canonical fields to RFC 9535 JSONPath expressions over the tenant's product JSON; `product_id`, `title`, `category_path`, `price_minor` and `currency` must be mapped, and `tenant_id`, `category_ids` and `listing_completeness` are derived, never mapped. `custom_fields` adds tenant fields: `{name, type, source, filterable, facetable, searchable, sortable, required}` with `type` one of `keyword`, `keyword[]`, `text`, `int`, `float`, `bool`, `date`. They are stored under `custom.{name}` (explicit OpenSearch mapping per index version, Qdrant payload index when filterable) and addressed as `custom.{name}` in filters, facets and CEL. Adding a field is an online change; changing a field's type or making it filterable needs a re-index.
+
 ## 5. Validation rules (enforced on publish)
 
 **Budgets**
@@ -174,7 +179,8 @@ The referenced `tenant_models` row has `type` set to `kserve_v2` or `openai_embe
 12. `relevance_floor` must be in `[0, 1]`.
 
 **Mapping**
-13. `field_mapping` is a JSONPath per field. It is validated against a sample payload supplied in onboarding step 2.
+13. `field_mapping` is a JSONPath per field. Keys must be mappable canonical fields, every mandatory field must be mapped, and every expression must parse. It is validated against a sample payload supplied in onboarding step 2.
+14. `custom_fields` names match `^[a-z][a-z0-9_]{0,62}$` and are unique, their count is within the plan cap, `text` fields can only be searchable, only `text`/`keyword` fields can be searchable, `date` fields cannot be facets, and `keyword[]` fields cannot be sortable.
 
 The validation response returns every error, not just the first: `[{ "path": "/rank/scorer/model_id", "code": "model_not_validated", "message": "..." }]`.
 

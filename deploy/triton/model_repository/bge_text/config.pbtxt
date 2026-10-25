@@ -1,0 +1,24 @@
+# Public embedder: INPUT_TEXT BYTES [N] -> EMBEDDING FP32 [N, 384], L2-normalized (docs/MODELS.md §1).
+name: "bge_text"
+platform: "ensemble"
+max_batch_size: 0
+input [ { name: "INPUT_TEXT", data_type: TYPE_STRING, dims: [ -1 ] } ]
+output [ { name: "EMBEDDING", data_type: TYPE_FP32, dims: [ -1, 384 ] } ]
+ensemble_scheduling {
+  step [
+    {
+      model_name: "bge_text_pre"
+      model_version: -1
+      input_map { key: "INPUT_TEXT", value: "INPUT_TEXT" }
+      output_map { key: "input_ids", value: "input_ids" }
+      output_map { key: "attention_mask", value: "attention_mask" }
+    },
+    {
+      model_name: "bge_encoder"
+      model_version: -1
+      input_map { key: "input_ids", value: "input_ids" }
+      input_map { key: "attention_mask", value: "attention_mask" }
+      output_map { key: "EMBEDDING", value: "EMBEDDING" }
+    }
+  ]
+}

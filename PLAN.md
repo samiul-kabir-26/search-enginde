@@ -3,19 +3,30 @@
 This plan turns `PROJECT.md` and `docs/*.md` into ordered, checkable work. Milestones follow `PROJECT.md` §6:
 finish each one fully (code, tests, lint, docs, and `make up && make seed` working) before starting the next.
 
-**Legend:** `[x]` done · `[ ]` to do · **Q** open question that must be answered before that step starts.
+**Legend:** `[x]` done · `[ ]` to do · **R** resolved decision (see §0) that a step implements.
 
 ---
 
 ## 0. Where we are
 
-**Milestone M0 (scaffold) is done locally.** The only M0 item left is a green CI run, which needs a GitHub remote.
+**M1 is done.** M0 is complete except a green CI run, which is blocked by the GitHub account billing lock, not by the code.
 
-What is already verified on this machine:
+M1 verification (2026-10-25, 12-core CPU laptop, CPU Triton):
 
 | Check | Result |
 |---|---|
-| `make up` | MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse and MinIO all report healthy. Kafka topics and S3 buckets are created. |
+| `make data` | 10,000 products across 162 product types, 200 vendors, 11,200 images (10,000 main + 1,200 eval alternates); deterministic (pytest: same seed gives the same sha256); recorded in `data/MANIFEST.json` |
+| `make models` / `make models-smoke` | ONNX parity cosine 1.000000 for `clip_vision`, `clip_text_encoder`, `bge_encoder`; all 9 Triton models READY; shapes, L2 norms and a text→image sanity check pass |
+| `make seed` | `demo` tenant created with the default config (active v1), 10,000 images in S3, 10,000 events published in 7 s |
+| `make run-indexer` | Indexed all 10,000 products in about 7 min from cold start: 0 invalid, 0 missing images |
+| `make backfill` | Rebuilt v3 from the topic in **7 m 31 s**; expected = lexical = vector = 10,000; aliases swapped |
+| Tests | Unit tests (`-race`), integration tests on testcontainers (OpenSearch, Qdrant, Redpanda), pytest, golangci-lint and Redocly all pass |
+
+M0 verification:
+
+| Check | Result |
+|---|---|
+| `make up` | MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse and SeaweedFS (S3) all report healthy. Kafka topics and S3 buckets are created. |
 | `make migrate` | 12 MySQL control-plane tables and the ClickHouse `events` table are created. A second run is a no-op. |
 | `search-api` / `control-api` | `/healthz` and `/readyz` (MySQL + Redis checks) return OK, `/metrics` serves Prometheus output, JSON access logs carry trace IDs, shutdown is graceful. |
 | `make lint`, `make test`, `make build` | Pass (golangci-lint v2 and Redocly OpenAPI lint). |
@@ -30,7 +41,7 @@ What is already verified on this machine:
 |---|---|---|
 | D1 | Go module path is `github.com/zavisoft/search-engine` | Not given in the spec. Rename with one `go mod edit -module` plus a sed if needed. |
 | D2 | Spec docs moved from the repo root to `docs/` | `PROJECT.md` refers to them as `docs/*.md`. |
-| D3 | MinIO is **built from source** (`deploy/minio/Dockerfile`, tag `RELEASE.2025-10-15T17-29-55Z`) | Upstream archived the repo and removed the `minio/minio` images. It is dev-only and the code uses only the S3 API, so it can be swapped for SeaweedFS or RustFS later. **Q:** keep MinIO or switch? |
+| D3 | Dev object storage is **SeaweedFS 4.48** (`chrislusf/seaweedfs`), replacing MinIO built from source | MinIO upstream is archived with no published images; SeaweedFS is maintained, Apache-2.0, ships official images, uses about 65 MB RAM, and passed S3 auth, anonymous read-only on the images bucket, and idempotent bucket creation. RustFS 1.0 was only days old. Code uses only the S3 API. |
 | D4 | MySQL is exposed on host port **3307** | A local MySQL already uses 3306. All host ports are configurable in `.env`. |
 | D5 | Events topic is named `search.events.v1` | The spec names only `catalog.product.v1`. |
 | D6 | Generated code lives in `internal/gen/inference` (KServe protos) and `internal/tenant/tenantdb` (sqlc) | These paths are not in the spec's layout. |
@@ -38,22 +49,118 @@ What is already verified on this machine:
 | D8 | OpenSearch 3.9.0, Qdrant 1.20.0, Redpanda 26.2.6, ClickHouse 26.8 LTS, Redis 7.4.11, MySQL 8.4.13, Triton 26.09 | Latest stable releases on the spec's pinned lines. Every image and dependency is pinned exactly. |
 | D9 | Python tooling uses `uv` (pinned 0.13.5, binary in `./bin`) with dependency groups; torch comes from the CPU wheel index | No pip or venv bootstrap exists on the host, and this keeps setup reproducible. |
 | D10 | `GOTOOLCHAIN=go1.27.3` is pinned in `go.mod` and the Makefile | The system Go is 1.22. golangci-lint must be built with a Go version at least as new as the module's. |
+| D12 | The indexer's event-order guard is OpenSearch `version_type=external_gte` on `source_version` | No extra version store: stale writes are rejected by the lexical index and skipped for Qdrant; equal versions re-apply, so replays are idempotent (`docs/DATA.md` §6). |
+| D13 | `select.py` downloads only the selected images (~11K, ~85 MB) instead of the 3 GiB tarball (used when present) | The ABO bucket gives about 4 KB/s per connection from this network; parallel per-image fetches take about 6 min. |
+| D14 | Selection keeps only English category trees (`/Categories/...`) and dedupes on main image too | Non-English marketplaces have localized category paths; ABO variants share photos, which would duplicate products and make image eval ambiguous. |
+| D15 | Pooling and L2 normalization are inside the exported ONNX graphs; ensembles take `[N]` BYTES with `max_batch_size: 0`, ONNX models batch dynamically | Keeps the §1 tensor contract exactly while still batching on the encoders. |
+| D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
-### Open questions (the spec is silent; answer before the listed milestone)
+### Resolved questions (answered 2026-10-25)
 
-| Q | Needed by | Question |
+The owner answered Q1–Q11. Where they delegated ("choose the best", "do what you recommend"), the choice below is the plan's.
+Each design is written into the spec docs and OpenAPI files in the milestone that implements it, before the code.
+
+**R1 — Catalog envelope, with tenant-defined custom fields** (M1, M2)
+- Topic `catalog.product.v1`. Key `{tenant_id}:{product_id}`, so updates to one product stay in order. Headers: `tenant-id`, `event-id`, `op`, `schema-version`.
+- Value: `{event_id, tenant_id, op: "upsert"|"delete", ts, source_version, product}`. `product` is the tenant's own JSON, mapped through `catalog.field_mapping`.
+- Delete is `op: "delete"` (product holds only the ID). A Kafka tombstone (null value) for the same key is treated as a delete. The indexer drops any event whose `source_version` is ≤ the stored one, which makes replays and out-of-order delivery safe.
+- **Mandatory canonical fields:** `product_id`, `title`, `category_path`, `price_minor`, `currency`. All other canonical fields are optional and have defaults (`status` = active; `vendor_id` = the tenant itself).
+- **Custom fields:** `catalog.custom_fields: [{name, type, source (JSONPath), filterable, facetable, searchable (boost), sortable, required}]`. Types: `keyword`, `keyword[]`, `text`, `int`, `float`, `bool`, `date`. The plan caps how many a tenant may define.
+- Custom fields are stored under `custom.{name}`: an explicit OpenSearch mapping per index version (never dynamic mapping) and a Qdrant payload, indexed when filterable. The filter registry merges canonical and custom fields, so filters, facets and pushdown work the same for both. CEL sees them as `item.custom.x`.
+- Adding a custom field is an online mapping update. Changing a field's type, or making it filterable, requires a reindex (`v{n+1}` plus an alias swap).
+
+**R2 — ABO download** (M1). Download into `data/raw/abo/` (git-ignored); there is plenty of disk space (284 GB free):
+
+| File | URL | Size | Needed |
+|---|---|---|---|
+| `abo-listings.tar` | https://amazon-berkeley-objects.s3.amazonaws.com/archives/abo-listings.tar | 83 MiB | yes |
+| `abo-images-small.tar` (256 px images plus `images/metadata/images.csv.gz`) | https://amazon-berkeley-objects.s3.amazonaws.com/archives/abo-images-small.tar | 3.0 GiB | yes |
+| `LICENSE-CC-BY-4.0.txt`, `README.md` | https://amazon-berkeley-objects.s3.amazonaws.com/LICENSE-CC-BY-4.0.txt (and `/README.md`) | small | yes |
+| `abo-images-original.tar`, `abo-spins.tar`, `abo-3dmodels.tar` | — | 110 / 40 / 154 GiB | **no** |
+
+```bash
+mkdir -p data/raw/abo && cd data/raw/abo
+curl -fLO https://amazon-berkeley-objects.s3.amazonaws.com/archives/abo-listings.tar
+curl -fLO https://amazon-berkeley-objects.s3.amazonaws.com/archives/abo-images-small.tar
+curl -fLO https://amazon-berkeley-objects.s3.amazonaws.com/LICENSE-CC-BY-4.0.txt
+curl -fLO https://amazon-berkeley-objects.s3.amazonaws.com/README.md
+```
+
+**R3 — Plans** (M2). Plans live in a MySQL `plans` table, editable from the platform admin panel (R7), and `tenants.plan` references it. Seed values:
+
+| Plan | max `total_ms` | Search RPS / burst | Events RPS | BYO providers | Egress | Custom fields | Max page depth |
+|---|---|---|---|---|---|---|---|
+| `starter` | 300 | 20 / 40 | 200 | no | none (platform only) | 20 | 500 |
+| `growth` | 600 | 100 / 200 | 1,000 | yes | any public host | 50 | 1,000 |
+| `enterprise` | 1,000 | 500 / 1,000 | 5,000 | yes | any public host, plus an optional per-tenant allowlist | 100 | 1,000 |
+
+The SSRF guard (private, loopback, link-local and metadata ranges) always applies, whatever the plan.
+
+**R4 — Pagination and facets** (M2). There are three pagination modes on the same request, and a request uses exactly one:
+1. `page.cursor`: opaque and the default, suited to infinite scroll.
+2. `page.number` + `page.size`: numbered pages. The response adds `total` and `total_pages`.
+3. `page.offset` + `page.size`: raw offset, for integrations and exports.
+- All three read from a cached, ordered result snapshot (Redis `snap:{tid}:{id}`, 10 min, at most max-depth IDs), keyed by tenant, config version, normalized query, filters and user. Paging is therefore stable: no duplicates across pages, and sponsored slots stay put.
+- Cursors are HMAC-signed `{snapshot, offset, config_version}`. A tampered or expired cursor returns 400 `invalid_cursor`.
+- Depth: positions 1..`rank.keep` are fully ranked. Positions past that, up to the plan's max depth, follow the pre-rank and then RRF order of the filtered candidates. `total_matches` (approximate, from OpenSearch) is also returned.
+- Facets are configured per tenant (`facets: [{field, size}]`) on filterable or facetable fields, canonical or custom. Defaults: `category_ids` (20), `brand` (20), `price_minor` buckets, `ship_regions` (10).
+- Facet counts come from OpenSearch aggregations over the full filtered lexical match set. They are disjunctive: a selected facet doesn't shrink its own counts (`post_filter`).
+
+**R5 — JWT issuance before control-api** (M2). Accepted: M2 ships the `auth` issuer, the JWKS and `POST /v1/auth/token` as a thin control-api slice for tenant `demo`.
+
+**R6 — Category centroids** (M2, M3). Centroids are the mean of the normalized `text` vectors per category (leaf and ancestors), re-normalized.
+- They are computed by the index job before its alias swap, and refreshed by `featurejob` (hourly) to absorb streaming upserts.
+- They are stored as a versioned binary blob in S3: `models/centroids/{tenant}/v{n}.bin` plus a sha256 manifest.
+- search-api loads them into memory per (tenant, index version) through the registry LRU and runs brute-force kNN. For 5,000 categories × 384 dims that takes under 1 ms, and needs no Redis or Qdrant round trip.
+
+**R7 — Auth settings, controllable from a platform admin panel** (M4, M9)
+- A new **platform admin** role (operator, not tenant): a `platform_admins` table, JWT scope `platform:admin`, and endpoints under `/v1/admin/*`. The first admin is bootstrapped from `PLATFORM_ADMIN_EMAIL` by `cmd/seed`. The UI lives at `/admin` in the web app.
+- Settings are stored in a `platform_settings` table (typed JSON, audited with `updated_by`) and validated against bounds. Changes propagate over Redis pub/sub `platform.settings.changed`, with no restart.
+- Defaults and bounds:
+  - Passwords: argon2id at the OWASP baseline (m = 46 MiB, t = 1, p = 1); parameters live in the PHC string, so raising them rehashes on next login. Minimum length 12.
+  - Email: Mailpit in dev (SMTP 1025, UI 8025) and SMTP in prod. Verification tokens last 24 h.
+  - Data-plane tokens from API keys: 15 min (bounds 5–60 min).
+  - Console session: 15 min access token plus a 7-day rotating refresh token in an httpOnly cookie (bounds 1–30 days).
+  - Ed25519 signing keys rotate every 30 days (bounds 7–90). The previous key stays in the JWKS for 7 days. The admin panel also has "rotate now" and emergency revoke.
+
+**R8 — Idempotency and shadow logs** (M4). Accepted:
+- Idempotency keys: Redis `idem:{tid}:{key}` with a 24 h TTL. The stored response is replayed. Reusing a key with a different body returns 422.
+- Shadow results: ClickHouse table `shadow_results` with request_id, tenant, active and shadow versions, top-k IDs from each, overlap@10, and latencies.
+
+**R9 — Vendor score and online features** (M6)
+- **`vendor_score` does not need a vector.** It is a scalar ranking feature (float in [0, 1]); vectors are only for semantic text and image matching. The tenant computes it in their own system, and we just store and read it.
+- Two ways in:
+  1. A `vendor` block in the product payload, via `catalog.vendor_mapping` (JSONPath).
+  2. `PUT /v1/vendors` (bulk, scope `catalog:write`) or topic `catalog.vendor.v1`, for when vendor data changes independently of products. This avoids reindexing every product of a vendor.
+  - An optional `{min, max}` in the mapping rescales the tenant's own range to [0, 1].
+- Vendor data is kept in Redis only, not in the search indexes. S3 (CEL `item.vendor`) and S4–S6 read it with one pipelined fetch per request (at most 300 distinct vendors). Filter pushdown on vendor fields other than `vendor_id` is not supported in v1.
+- Redis keys use a `{tid}` hash tag, so they are Redis-Cluster safe:
+
+| Key | Fields | TTL |
 |---|---|---|
-| Q1 | M1 | What is the `catalog.product.v1` envelope (key, headers, JSON shape, delete/tombstone semantics)? |
-| Q2 | M1 | Can the ABO archives (listings plus the small-images tarball, several GB) be downloaded to this machine, and where? |
-| Q3 | M2 | What are the plan definitions: plan names, max `budgets.total_ms`, rate limits, and per-plan egress allowlist? |
-| Q4 | M2 | Facets: which fields, how many values, and computed from which candidate set? What is the deep-paging limit for cursors? |
-| Q5 | M2 | How is the JWT issued before `control-api` exists? Proposal: ship the `auth` issuer, JWKS and `POST /v1/auth/token` in M2 as a thin `control-api` slice for the `demo` tenant. |
-| Q6 | M3 | Category centroids for S1 kNN: who computes them (indexer or a job), and where are they stored (Redis or MinIO)? |
-| Q7 | M4 | Password hashing (proposal: argon2id), email verification delivery in dev (proposal: Mailpit), JWT lifetime and key rotation period. |
-| Q8 | M4 | Idempotency-key store (proposal: Redis with a 24 h TTL) and where shadow-mode results are logged (proposal: ClickHouse). |
-| Q9 | M6 | Redis key scheme and TTLs for online features. How is `vendor_score` defined? |
-| Q10 | M8 | Ad pacing algorithm (proposal: probabilistic throttling against the hourly spend curve) and the GSP quality score definition. |
-| Q11 | M1 | Model licenses for `clip-vit-b32` and `bge-small-en-v1.5` must be confirmed before they are offered to tenants (`docs/MODELS.md` §2). |
+| `f:{tid}:i:{product_id}` | ctr_7d, ctr_30d, cvr_7d, cvr_30d, orders_30d_log, updated_at | 48 h (featurejob refreshes ≤ 15 min; expired → declared defaults) |
+| `f:{tid}:v:{vendor_id}` | score, on_time_dispatch_rate, dispute_rate, response_hours, verified | none (the tenant is the source of truth) |
+| `f:{tid}:u:{user_id}` | top-N category affinities, price_band | 30 days |
+
+- For the demo tenant, the synthetic vendor score comes from `vendors.jsonl` using a documented formula.
+
+**R10 — Ads** (M8)
+- Tenants set up campaigns. Pacing is accepted: probabilistic throttling against the hourly spend curve, with state in Redis.
+- Default quality score: `quality = 0.6·relevance + 0.4·pCTR`.
+  - relevance: the S5 score, min-max normalized within the request.
+  - pCTR: position-debiased ad CTR, Bayesian-smoothed toward the tenant's average sponsored CTR (prior strength 100 impressions).
+  - Tenants can tune the weights in `ads.quality`.
+- GSP: `price_i = bid_{i+1}·q_{i+1}/q_i + 1 minor unit`, capped at `bid_i`, with a per-tenant reserve CPC. Charging is CPC, on a `click` event with `sponsored=true`.
+- **The platform admin controls** (`platform_settings.ads`, overridable per plan):
+  - which campaign fields tenants can see and edit (bid, budget, targeting dimensions);
+  - what a sponsored result shows (label text, vendor name, disclosure link);
+  - max ad slots per page, a minimum relevance floor, and reserve-price bounds.
+
+**R11 — Model licenses** (M1). `bge-small-en-v1.5` is MIT, so it is kept. For images, the platform model `clip-vit-b32` now loads **`laion/CLIP-ViT-B-32-laion2B-s34B-b79K`** (MIT) instead of `openai/clip-vit-base-patch32`.
+- Why: OpenAI's model card declares "any deployed use case… out of scope". LAION's checkpoint has the same ViT-B/32 architecture, 512 dims and `transformers` support, and better zero-shot accuracy, so no spec dims change.
+- SigLIP 2 (Apache-2.0) was rejected for now: it has 768 dims and about 8× the CPU cost, which breaks the ≤ 10 min backfill target. It can be offered later as an optional platform model.
+
+Follow-ups confirmed on 2026-10-25: R4's three modes are exactly cursor, page number and offset; D3 chose SeaweedFS (delegated).
 
 ---
 
@@ -71,39 +178,44 @@ What is already verified on this machine:
 - [x] `tools/` Python project (`pyproject.toml`, `uv.lock`), `tools/dataprep/ATTRIBUTION.md`
 - [x] `web/onboarding` Next.js 16 + TypeScript strict + Tailwind 4, typed client from `control.yaml`, Playwright config
 - [x] CI workflow `.github/workflows/ci.yml`: Go lint/test/build plus generated-code drift check, integration, Compose health, Python ruff, web build
-- [ ] **CI green on GitHub.** Needs a remote; push the repo and confirm.
+- [x] Pushed to `github.com/samiul-kabir-26/search-enginde` (public)
+- [ ] **CI green on GitHub.** Blocked by the GitHub account billing lock; after that is fixed, run `gh run rerun 40089879724`.
 
 ---
 
-## M1 — Data prep, canonical schema, Triton models, indexer, seed
+## M1 — Data prep, canonical schema, Triton models, indexer, seed ✅
 
 **Done when:** about 10K products are indexed into OpenSearch and Qdrant for tenant `demo`, and the counts are verified.
 
 **Phase 1: data** (`tools/dataprep`, Python)
-- [ ] Download the ABO listings, small images and `images.csv.gz` into `data/raw/` (**Q2**). Inspect them, and record the real archive and field names before writing parsers (`docs/DATA.md` §2).
-- [ ] `select.py --seed 42`: filters, dedup, stratification (≤400 per type, drop types with <20), 10K target preferring items with alternates → `data/products.raw.jsonl` and `data/images/`
-- [ ] `synthesize.py`: 200 Zipf vendors (`vendors.jsonl`), lognormal prices (`price_params.yaml`), moq, stock (5% zero), ship_regions, status, rating ~ hidden q, created_at, listing_completeness → `products.canonical.jsonl`
-- [ ] `MANIFEST.json` with counts, seeds and sha256 per file; `make data`; pytest for determinism (same seed gives same sha256)
+- [x] ABO metadata downloaded by `make data` (`download.py`, parallel ranges); real field names recorded in `docs/DATA.md` §2 (`node[].node_name`, list-valued `product_type`)
+- [x] `select.py --seed 42`: filters (English category tree), dedup (item, title+brand, main image), stratification (≤400 per type, drop types with <20, equal quota), 10K target preferring items with alternates, 1,200 eval alternates → `data/products.raw.jsonl`, `data/eval/image_eval_seed.jsonl`, `data/images/`
+- [x] `synthesize.py`: 200 Zipf vendors (`vendors.jsonl`), lognormal prices (`price_params.yaml`), moq, stock (5% zero), ship_regions, status, rating ~ hidden q, created_at, listing_completeness → `products.canonical.jsonl`; hidden quality in `data/hidden/`
+- [x] `MANIFEST.json` with params, counts and sha256 per file; `make data`; pytest for determinism (same seed gives same sha256)
 
 **Phase 2: canonical schema** (`internal/catalog`)
-- [ ] `Product` struct with the filterable-field registry (drives filter validation and pushdown), validation, and the UUIDv5 point ID
-- [ ] JSONPath field mapping (choose a library and verify JSONPath support, including `[*]`), plus a mapping-preview function reused in M4
+- [x] `Product` struct with the filterable-field registry, validation of mandatory fields, and the UUIDv5 point ID (**R1**)
+- [x] Custom fields: `catalog.custom_fields` schema and validation, type coercion, `custom.{name}` storage, registry merge (**R1**); spec added to `docs/TENANT_CONFIG.md` and `docs/DATA.md`
+- [x] JSONPath field mapping with `github.com/theory/jsonpath` (RFC 9535, `[*]` verified in tests), plus `Mapper.Preview` for M4
+- [x] `catalog.product.v1` envelope: encode, decode, header checks, tombstones (**R1**)
 
 **Phase 3: models** (`tools/models`, `deploy/triton`)
-- [ ] `export.py`: CLIP vision and text towers and BGE-small → ONNX with dynamic batch axes; parity cosine ≥ 0.999 on 100 samples
-- [ ] Triton repository: Python preprocessing models plus `clip_image`, `clip_text` and `bge_text` ensembles; CPU instance groups; dynamic batching (`max_queue_delay_microseconds` ≈ 2000)
-- [ ] `make up-models` healthy; smoke-infer every ensemble; outputs L2-normalized with the expected dims (512 and 384)
+- [x] `export.py`: CLIP vision and text towers (`laion/CLIP-ViT-B-32-laion2B-s34B-b79K`, **R11**) and BGE-small → ONNX with dynamic axes; parity cosine ≥ 0.999 on 100 samples (measured 1.000000)
+- [x] Triton repository: Python preprocessing models plus `clip_image`, `clip_text` and `bge_text` ensembles; CPU instance groups; dynamic batching (`max_queue_delay_microseconds` 2000)
+- [x] `make up-models` healthy; `make models-smoke` checks every ensemble's shape, L2 norm and a semantic sanity case
 
 **Phase 4: providers and binaries** (Go)
-- [ ] `providers/embedder/kservev2`: gRPC client, tensor names per `docs/MODELS.md` §1, batch splitting
-- [ ] `providers/lexical/opensearch`: `mapping.json`, create `t_{tenant}_products_v{n}`, alias swap, bulk upsert and delete, health
-- [ ] `providers/vectorstore/qdrant`: named vectors `text`/`image`, HNSW m=16 / ef_construct=128, payload indexes, alias swap, upsert and delete
-- [ ] `cmd/indexer`: franz-go consumer for `catalog.product.v1` (**Q1**), batching embed + upsert, backfill mode, idempotent re-processing
-- [ ] `cmd/seed`: upload images to MinIO, create the `demo` tenant (tenant row, default draft, active v1), publish products as events
-- [ ] Integration tests (testcontainers): OpenSearch, Qdrant, Redpanda
-- [ ] Verify the count match and a full backfill in ≤ 10 min on CPU Triton
+- [x] `providers/embedder/kservev2`: gRPC client, tensor names per `docs/MODELS.md` §1, batch splitting, raw and typed outputs, `INVALID_ARG` → `pipeline.ErrInvalidInput`
+- [x] `providers/lexical/opensearch`: `mapping.json` plus custom fields, versioned indexes, alias swap, bulk upsert and delete with `external_gte` versioning (**D12**), health
+- [x] `providers/vectorstore/qdrant`: named vectors `text`/`image`, HNSW m=16 / ef_construct=128, payload indexes on every filterable field, alias swap, upsert and delete
+- [x] `cmd/indexer`: consumer group with manual commits and retry, per-poll dedup and concurrent chunks, first-use v1 creation, `-backfill` with count verification and alias swap; corrupt images isolated
+- [x] `cmd/seed`: upload images to S3, create the `demo` tenant (tenant row, default draft, active v1, onboarding state), publish products as events in the storefront shape of the default mapping
+- [x] Integration tests (testcontainers): OpenSearch, Qdrant, Redpanda
+- [x] Verify the count match and a full backfill in ≤ 10 min on CPU Triton (7 m 31 s)
 
-New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-client`, `aws-sdk-go-v2`, `google/uuid`, `oklog/ulid/v2`, `testcontainers-go`.
+Carried forward: Triton runs at about 50% CPU during backfill, so ORT thread and instance tuning is left for M10 load work. Image URLs are fetched with a plain size- and time-limited HTTP client; M5 moves this to `security.EgressClient` with the platform image host allowed.
+
+New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-client`, `aws-sdk-go-v2`, `theory/jsonpath`, `oklog/ulid/v2`, `golang.org/x/sync`, `testcontainers-go` (OpenSearch, Qdrant, Redpanda modules).
 
 ---
 
@@ -112,15 +224,17 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 **Done when:** text search returns ranked results with a per-stage trace at `?explain=true`, and p95 ≤ 150 ms locally at 50 RPS.
 
 - [ ] `internal/tenant`: typed config sections (`docs/TENANT_CONFIG.md` §3), `DisallowUnknownFields`, `Validate(ctx, deps) []FieldError` (rules that need no live deps), schema-version migration hook, sqlc store, cache, resolver
-- [ ] `internal/auth`: EdDSA verify, JWKS fetch/cache/rotate, tenant context from `tid`, scope checks (`search:read`, `search:debug`); token issuance slice (**Q5**)
+- [ ] `internal/auth`: EdDSA verify, JWKS fetch/cache/rotate, tenant context from `tid`, scope checks (`search:read`, `search:debug`); thin control-api token-issuance slice for `demo` (**R5**)
 - [ ] `internal/pipeline`: the consumer-side interfaces (`docs/ARCHITECTURE.md` §3), `Query`/`Hit`/`Candidate`/`Trace` types, per-stage budget `min(stage, remaining)`, RRF (k=60, per-retriever weights), explain trace (top 50), stage metrics
 - [ ] `internal/resilience`: `Call(ctx, key, primary, fallback)` with deadline, `sony/gobreaker/v2` keyed by tenant+stage+provider, and `search_stage_fallback_total`
 - [ ] `FilterExpr` AST: parse and validate (operators, depth ≤ 3, filterable fields only), translate to OpenSearch `bool.filter` and the Qdrant payload filter. Pushdown is mandatory.
-- [ ] S1 text: NFKC, lowercase, whitespace collapse; attribute dictionary (tenant-extensible); category kNN vote (**Q6**); embeddings
+- [ ] S1 text: NFKC, lowercase, whitespace collapse; attribute dictionary (tenant-extensible); category kNN vote over in-memory centroids loaded from S3 (**R6**); embeddings
+- [ ] Centroid builder (shared by the index job and `featurejob`): `models/centroids/{tenant}/v{n}.bin` plus manifest (**R6**)
 - [ ] S2 retrievers: `lexical_bm25` (field boosts), `vector_text`, `vector_text_to_image`, `category_popular`; errgroup fan-out; partial failure tolerated; all failing returns `degraded=true`, never 5xx
 - [ ] S3: `always_filters` pushdown (CEL rules come in M7)
 - [ ] S4/S5 `providers/scorer/defaultlinear`, plus keep/cut; S6 passthrough
-- [ ] `POST /v1/search`: validation, facets and cursor (**Q4**), problem+json errors; per-tenant GCRA rate limit (`go-redis/redis_rate`, **Q3**)
+- [ ] `POST /v1/search`: validation, problem+json errors, configurable disjunctive facets, and three pagination modes (cursor, page number, offset) over a Redis result snapshot with signed cursors and plan max depth (**R4**). Update `search.yaml` first.
+- [ ] `plans` table migration and seed (starter, growth, enterprise); per-tenant GCRA rate limit from the plan (`go-redis/redis_rate`, **R3**)
 - [ ] Golden tests for the explain trace; unit tests for every stage; coverage ≥ 80% on pipeline, stages and tenant
 - [ ] k6 `loadtest/search_text.js` at 50 RPS: p95 ≤ 150 ms
 
@@ -143,12 +257,13 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 
 **Done when:** activating a new version changes search behavior within 5 s, without a restart.
 
-- [ ] Auth: sign-up (tenant, owner, default draft, onboarding state), login, users and roles, API keys (shown once, hashed), `POST /v1/auth/token`, EdDSA key management and JWKS (**Q7**)
-- [ ] Idempotency-Key middleware (24 h; **Q8**)
+- [ ] Auth: sign-up (tenant, owner, default draft, onboarding state), login (argon2id), email verification (Mailpit in Compose), users and roles, API keys (shown once, hashed), `POST /v1/auth/token`, session refresh rotation, Ed25519 key rotation and JWKS (**R7**)
+- [ ] Platform admin: `platform_admins` and `platform_settings` tables, `platform:admin` scope, `/v1/admin/*` (settings with bounds, plans CRUD, key rotate/revoke, tenant list), `platform.settings.changed` pub/sub, bootstrap admin in `cmd/seed` (**R3**, **R7**)
+- [ ] Idempotency-Key middleware: Redis `idem:{tid}:{key}`, 24 h, replay on match, 422 on body mismatch (**R8**)
 - [ ] Config: draft GET/PUT, validate (returns every error), publish (immutable, monotonic version), activate, shadow (0–20%), diff
 - [ ] Propagation: Redis pub/sub `tenant.config.activated` → search-api invalidation; 30 s reconcile loop; old-version provider drain
 - [ ] `internal/registry`: `(kind, type)` factories, `Deps`, LRU per `(tenant, version, stage)` with close on eviction or supersede
-- [ ] Shadow execution on sampled traffic (results logged, never returned)
+- [ ] Shadow execution on sampled traffic (results logged to ClickHouse `shadow_results`, never returned; **R8**)
 - [ ] Onboarding: state machine, `PUT /onboarding/steps/{step}` validation per `docs/ONBOARDING.md` §4, engine-explainer endpoints
 - [ ] Catalog mapping preview, catalog upload presign, index jobs (build `v{n+1}`, alias swap, progress)
 - [ ] Playground search (draft or version, explain on)
@@ -162,6 +277,7 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 **Done when:** in a chaos test, a BYO endpoint that fails or hangs falls back to the default within the stage budget.
 
 - [ ] `internal/security`: EgressClient (https only, resolve on every dial, `net.Dialer.Control` rejects RFC 1918, loopback, link-local, metadata, ::1 and fc00::/7), per-plan allowlist
+- [ ] Indexer image fetches (`indexer.HTTPFetcher`) go through EgressClient, with the platform's own S3 image host explicitly allowed
 - [ ] SecretStore interface: AES-256-GCM envelope encryption in MySQL (dev) and a Vault implementation; `POST /secrets`; never logged or returned
 - [ ] Vector adapters: Qdrant (BYO), pgvector (`pgx/v5`, SQL WHERE pushdown), Milvus (Go client v2); `payload_mapping`
 - [ ] Embedders: KServe v2 (gRPC plus REST fallback), `openai_embeddings` (client-side L2 normalization)
@@ -179,7 +295,8 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 - [ ] search-api emits async `impression` events
 - [ ] ClickHouse migration: Kafka engine table plus materialized view into `events`
 - [ ] `tools/dataprep/simulate.py`: users (affinity, price band, region), sessions, hidden utility, 10% randomized positions, about 2M impressions → `data/events/`; `cmd/seed --events`
-- [ ] `cmd/featurejob`: position-debiased CTR/CVR (7d/30d), orders, vendor features, user affinity and price band → Redis (**Q9**); schedule ≤ 15 min
+- [ ] `cmd/featurejob`: position-debiased CTR/CVR (7d/30d), orders, user affinity and price band → Redis keys and TTLs per **R9**; schedule ≤ 15 min; hourly centroid refresh (**R6**)
+- [ ] Vendor data from the tenant: `catalog.vendor_mapping` in product payloads, `PUT /v1/vendors` (bulk) and topic `catalog.vendor.v1` → `f:{tid}:v:{vendor_id}`, with optional range normalization (**R9**)
 - [ ] `providers/features`: Redis FeatureReader used by S4–S6
 
 ---
@@ -204,7 +321,8 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 
 - [ ] Personalization: `rank + α·affinity + β·price_band_match`; BYO re-ranker (KServe v2) replaces it
 - [ ] Diversity: greedy `max_per_vendor` per window
-- [ ] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, GSP on bid × quality, pacing in Redis (**Q10**), dedup against organic, `sponsored=true`
+- [ ] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, quality = relevance + smoothed pCTR, GSP with reserve CPC, probabilistic pacing in Redis, dedup against organic, `sponsored=true` (**R10**)
+- [ ] Admin ad controls (`platform_settings.ads`, per-plan overrides): tenant-editable campaign fields, sponsored display fields, max slots, minimum floor, reserve bounds (**R10**)
 - [ ] `data/campaigns.jsonl` (300) seeded; ads reports from ClickHouse
 - [ ] Golden test: ads disabled gives organic output identical to the pre-ads baseline
 
@@ -218,7 +336,8 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 - [ ] `/onboarding/[step]` with a step guard; Server Components for data, client components for interactive pieces
 - [ ] Components: `Stepper`, `EngineDiagram` (accessible, mobile-first SVG), `StagePanel`, `ProviderChooser`, `ConnectionForm`, `ModelRegistrationForm`, `JsonPathMapper`, `CelEditor`, `WeightSliders`, `SlotPicker`, `IndexProgress`, `PlaygroundSearch`, `ExplainTrace`
 - [ ] Server `errors[].path` mapped to fields; focus management; `aria-live` progress
-- [ ] Playwright E2E per `docs/ONBOARDING.md` §6 (`npx playwright install chromium` first)
+- [ ] `/admin` (platform admin): settings, plans, signing keys, ad controls, tenants (**R7**, **R10**)
+- [ ] Playwright E2E per `docs/ONBOARDING.md` §6 plus an admin settings flow (`npx playwright install chromium` first)
 
 ---
 
@@ -245,7 +364,10 @@ New deps: `twmb/franz-go`, `opensearch-project/opensearch-go/v4`, `qdrant/go-cli
 
 ```bash
 make setup          # Go tools, Python venv, web deps, ONNX Runtime (first time)
-make up && make migrate
+make up-models && make migrate   # infra + Triton
+make data && make models         # dataset (ABO subset) and ONNX exports, once
+make seed                        # demo tenant, images, catalog events
+make run-indexer                 # streaming indexer (or: make backfill TENANT=demo)
 make run-search-api # :8080   (make run-control-api → :8081)
 make lint test
 make up-obs         # + Jaeger :16686, Prometheus :9090, Grafana :3001

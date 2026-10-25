@@ -23,8 +23,8 @@ Preprocessing (tokenization, image resize and normalization) is the model server
 
 | ID | Source | Dim | Use |
 |---|---|---|---|
-| `clip-vit-b32` | `openai/clip-vit-base-patch32` (Hugging Face) | 512 | Image embeddings, plus text→image via the text tower |
-| `bge-small-en-v1.5` | `BAAI/bge-small-en-v1.5` (Hugging Face) | 384 | Text semantic retrieval (CLS pooling, normalized) |
+| `clip-vit-b32` | `laion/CLIP-ViT-B-32-laion2B-s34B-b79K` (Hugging Face, MIT) | 512 | Image embeddings, plus text→image via the text tower |
+| `bge-small-en-v1.5` | `BAAI/bge-small-en-v1.5` (Hugging Face, MIT) | 384 | Text semantic retrieval (CLS pooling, normalized) |
 | `prerank-gbdt-v1` | Trained in M7 | n/a | In-process ONNX |
 | `rank-gbdt-v1` | Trained in M7 | n/a | Triton ONNX backend |
 
@@ -39,10 +39,17 @@ Verify each model's license before shipping it as a platform default to tenants.
 
 All exports use dynamic batch axes. Verify ONNX vs PyTorch parity: cosine ≥ 0.999 on 100 samples.
 
-**Ensembles.** Each embedder is an ensemble of a Python-backend preprocessing model followed by the ONNX model:
-- `clip_image`: decode JPEG, then `CLIPImageProcessor`, then the vision ONNX, then L2 normalize.
-- `clip_text`: `CLIPTokenizer`, then the text ONNX, then L2 normalize.
-- `bge_text`: `AutoTokenizer`, then ONNX, then CLS token, then L2 normalize.
+Pooling and L2 normalization are part of each exported graph, and the Hugging Face revisions are pinned in `export.py`. `make models` writes the ONNX files and tokenizer/processor assets (git-ignored); the configs and `model.py` files are committed.
+
+**Ensembles.** Each public embedder is an ensemble of a Python-backend preprocessing model (`*_pre`) and an ONNX model:
+
+| Ensemble | Preprocessing | ONNX model |
+|---|---|---|
+| `clip_image` | `clip_image_pre`: decode JPEG/PNG/WebP (≤ 4096² pixels), `CLIPImageProcessor` | `clip_vision` → `[N, 512]` |
+| `clip_text` | `clip_text_pre`: tokenizer, max 77 tokens | `clip_text_encoder` → `[N, 512]` |
+| `bge_text` | `bge_text_pre`: tokenizer, max 512 tokens | `bge_encoder` (CLS pooling) → `[N, 384]` |
+
+Ensembles and preprocessors take `[N]` BYTES exactly as in §1 (`max_batch_size: 0`). The ONNX models batch dynamically (`max_batch_size: 64`). Text is padded to the longest item in a request, so only same-length requests merge. An undecodable image fails its request with `INVALID_ARG`; the indexer then embeds that batch one image at a time and indexes the bad product without an image vector. `make models-smoke` checks shapes, norms and a text→image sanity case.
 
 **Runtime.** Use the CPU instance group in dev, and configure dynamic batching (`max_queue_delay_microseconds` ≈ 2000). Pin the Triton image tag; the Python backend dependencies are installed into a custom image built in `deploy/triton/Dockerfile`.
 

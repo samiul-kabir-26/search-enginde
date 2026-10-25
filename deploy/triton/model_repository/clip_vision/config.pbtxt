@@ -1,0 +1,7 @@
+name: "clip_vision"
+backend: "onnxruntime"
+max_batch_size: 64
+input [ { name: "pixel_values", data_type: TYPE_FP32, dims: [ 3, 224, 224 ] } ]
+output [ { name: "EMBEDDING", data_type: TYPE_FP32, dims: [ 512 ] } ]
+instance_group [ { kind: KIND_CPU, count: 1 } ]
+dynamic_batching { max_queue_delay_microseconds: 2000 }

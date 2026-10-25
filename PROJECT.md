@@ -48,7 +48,7 @@ When a spec is ambiguous, stop and ask; do not invent behavior. When a library o
 | Circuit breaker | `sony/gobreaker/v2` |
 | Concurrency | `golang.org/x/sync/errgroup` |
 | Image decoding | stdlib `image/jpeg`, `image/png`, plus `golang.org/x/image/webp` |
-| Object storage | S3 API (MinIO in dev), `aws-sdk-go-v2` |
+| Object storage | S3 API (SeaweedFS in dev), `aws-sdk-go-v2` |
 | Secrets | `SecretStore` interface: Vault in prod; AES-256-GCM envelope encryption in MySQL for dev |
 | Auth | EdDSA JWT issued by `control-api`; JWKS consumed by `search-api` |
 | Observability | OpenTelemetry (traces and metrics), `log/slog` JSON logs, Prometheus exporter |

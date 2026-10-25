@@ -15,12 +15,27 @@ automatically), Node 24, Python 3.12, and `curl`.
 
 ```bash
 make setup            # pinned Go tools → ./bin, tools/.venv, web deps, ONNX Runtime
-make up               # infra: MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse, MinIO
+make up               # infra: MySQL, Redis, OpenSearch, Qdrant, Redpanda, ClickHouse, SeaweedFS (S3)
 make migrate
 make run-search-api   # http://localhost:8080/healthz
 make run-control-api  # http://localhost:8081/healthz
 make help             # all targets
 ```
+
+### Demo catalog (M1)
+
+```bash
+make up-models        # infra + Triton (CPU); the image is large (~25 GB)
+make data             # ABO subset: 10K products, synthetic vendors/prices, ~11K images (deterministic)
+make models           # export CLIP + BGE to ONNX into deploy/triton/model_repository
+make up-models        # restart so Triton loads the exported models; then `make models-smoke`
+make seed             # demo tenant + images in S3 + catalog.product.v1 events
+make run-indexer      # embed and index into OpenSearch and Qdrant (~7 min on CPU)
+make backfill         # optional: rebuild the demo index from the topic and verify counts
+```
+
+Product data comes from [Amazon Berkeley Objects](https://amazon-berkeley-objects.s3.amazonaws.com/index.html)
+(CC BY 4.0, credit Amazon.com); see `tools/dataprep/ATTRIBUTION.md`.
 
 | Service | Host port |
 |---|---|
@@ -30,8 +45,9 @@ make help             # all targets
 | Qdrant | 6333 (HTTP), 6334 (gRPC) |
 | Redpanda (Kafka) | 19092 |
 | ClickHouse | 8123 (HTTP), 9000 (native) |
-| MinIO | 9100 (S3), 9101 (console) |
+| SeaweedFS S3 | 9100 |
 | Triton (`make up-models`) | 8000, 8001, 8002 |
+| Indexer (`make run-indexer`) | 8082 (health, metrics) |
 | Jaeger / Prometheus / Grafana (`make up-obs`) | 16686 / 9090 / 3001 |
 
 Ports and credentials live in `.env` (created from `.env.example`). Credentials are dev-only.
