@@ -3,6 +3,8 @@ package qdrant
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/qdrant/go-client/qdrant"
@@ -43,7 +45,7 @@ func (s *Store) Search(ctx context.Context, req pipeline.VectorSearch) ([]pipeli
 	}
 	hits := make([]pipeline.Hit, 0, len(points))
 	for _, p := range points {
-		id, doc := docFromPayload(p.GetPayload(), s.spec)
+		id, doc := docFromPayload(p.GetPayload(), s.spec, s.customFields())
 		if id == "" {
 			continue
 		}
@@ -56,14 +58,30 @@ func (s *Store) Search(ctx context.Context, req pipeline.VectorSearch) ([]pipeli
 // display fields are hydrated per page from the lexical index, so they are not read for
 // hundreds of hits.
 func (s *Store) payloadFields() []string {
-	out := make([]string, len(vectorstore.RankingFields))
-	for i, f := range vectorstore.RankingFields {
+	fields := s.rankingFields()
+	out := make([]string, len(fields))
+	for i, f := range fields {
 		out[i] = s.spec.Field(f)
 	}
 	return out
 }
 
-func docFromPayload(p map[string]*qdrant.Value, spec vectorstore.Spec) (string, *pipeline.Doc) {
+// customFields are the canonical filterable custom fields read back with ranking fields.
+func (s *Store) customFields() []string {
+	if s.byo {
+		return s.spec.Custom
+	}
+	return vectorstore.CustomRankingFields(s.registry)
+}
+
+// rankingFields are the canonical ranking fields, with the platform store's filterable custom
+// fields from its registry (a BYO store's come with its spec).
+func (s *Store) rankingFields() []string {
+	return append(slices.Clone(vectorstore.RankingFields), s.customFields()...)
+}
+
+// docFromPayload builds the ranking doc; custom are the canonical custom fields to read.
+func docFromPayload(p map[string]*qdrant.Value, spec vectorstore.Spec, custom []string) (string, *pipeline.Doc) {
 	get := func(k string) *qdrant.Value { return p[spec.Field(k)] }
 	str := func(k string) string { return get(k).GetStringValue() }
 	num := func(k string) float64 {
@@ -90,7 +108,44 @@ func docFromPayload(p map[string]*qdrant.Value, spec vectorstore.Spec) (string, 
 	if t, err := time.Parse(time.RFC3339, str("created_at")); err == nil {
 		d.CreatedAt = &t
 	}
+	d.Status = str("status")
+	if v := get("stock"); v != nil {
+		n := v.GetIntegerValue()
+		d.Stock = &n
+	}
+	for _, v := range get("ship_regions").GetListValue().GetValues() {
+		d.ShipRegions = append(d.ShipRegions, v.GetStringValue())
+	}
+	for _, c := range custom {
+		if v := get(c); v != nil {
+			if d.Custom == nil {
+				d.Custom = map[string]any{}
+			}
+			d.Custom[strings.TrimPrefix(c, catalog.CustomPrefix)] = valueOf(v)
+		}
+	}
 	return str(vectorstore.ProductIDField), d
+}
+
+// valueOf converts a payload value to a Go value (string, int64, float64, bool or a list).
+func valueOf(v *qdrant.Value) any {
+	switch k := v.GetKind().(type) {
+	case *qdrant.Value_StringValue:
+		return k.StringValue
+	case *qdrant.Value_IntegerValue:
+		return k.IntegerValue
+	case *qdrant.Value_DoubleValue:
+		return k.DoubleValue
+	case *qdrant.Value_BoolValue:
+		return k.BoolValue
+	case *qdrant.Value_ListValue:
+		out := make([]any, 0, len(k.ListValue.GetValues()))
+		for _, x := range k.ListValue.GetValues() {
+			out = append(out, valueOf(x))
+		}
+		return out
+	}
+	return nil
 }
 
 // Translate converts a compiled filter to a Qdrant payload filter (nil matches everything).
@@ -326,6 +381,6 @@ func (s *Store) Get(ctx context.Context, productID string) (*pipeline.VectorPoin
 		}
 		vecs[name] = v
 	}
-	_, doc := docFromPayload(p.GetPayload(), s.spec)
+	_, doc := docFromPayload(p.GetPayload(), s.spec, s.customFields())
 	return &pipeline.VectorPoint{ProductID: productID, Vectors: vecs}, doc, nil
 }

@@ -68,7 +68,16 @@ type Job struct {
 	Docs func(tid tenant.ID) DocSource
 	Log  *slog.Logger
 	Now  func() time.Time
+	// Until, when set, computes features as of that time from earlier events only (training
+	// datasets: no feature may see the period it is evaluated on). Otherwise events up to
+	// MaxClockSkew past Now count.
+	Until time.Time
+	// SkipUsers skips user features (training datasets only need item features).
+	SkipUsers bool
 }
+
+// MaxClockSkew matches the future skew POST /v1/events accepts.
+const MaxClockSkew = 5 * time.Minute
 
 // Report summarizes one run.
 type Report struct {
@@ -85,21 +94,27 @@ type Report struct {
 
 // Run refreshes the tenant's propensity, item and user features.
 func (j *Job) Run(ctx context.Context, tid tenant.ID) (Report, error) {
-	start := j.Now()
+	t0 := j.Now()
+	start, end := t0, t0.Add(MaxClockSkew)
+	if !j.Until.IsZero() {
+		start, end = j.Until, j.Until
+	}
 	rep := Report{Tenant: tid}
-	from := start.Add(-Window)
-	prop, src, err := j.propensity(ctx, tid, from)
+	w := window{from: start.Add(-Window).UnixMilli(), end: end.UnixMilli()}
+	prop, src, err := j.propensity(ctx, tid, w)
 	if err != nil {
 		return rep, err
 	}
 	rep.Eta, rep.EtaSource, rep.RandomizedClicks = prop.Eta, src, prop.Clicks
-	if rep.Items, err = j.items(ctx, tid, prop.Eta, start); err != nil {
+	if rep.Items, err = j.items(ctx, tid, prop.Eta, start, w); err != nil {
 		return rep, err
 	}
-	if rep.Users, err = j.users(ctx, tid, from); err != nil {
-		return rep, err
+	if !j.SkipUsers {
+		if rep.Users, err = j.users(ctx, tid, w); err != nil {
+			return rep, err
+		}
 	}
-	rep.Took = j.Now().Sub(start)
+	rep.Took = j.Now().Sub(t0)
 	return rep, nil
 }
 
@@ -148,19 +163,24 @@ func FitPropensity(stats []PositionStat) (eta float64, clicks int64, ok bool) {
 
 // propensity estimates eta from the window's randomized requests, falling back to the stored
 // estimate, then to no debiasing.
-func (j *Job) propensity(ctx context.Context, tid tenant.ID, from time.Time) (features.Propensity, string, error) {
+// window bounds the events a run reads: [from, end) in Unix milliseconds.
+type window struct{ from, end int64 }
+
+func (j *Job) propensity(ctx context.Context, tid tenant.ID, w window) (features.Propensity, string, error) {
 	rows, err := j.CH.Query(ctx, `
 		SELECT toUInt32(i.position), count(), toUInt64(sum(c.clicked))
 		FROM (
 			SELECT request_id, product_id, position FROM events FINAL
-			WHERE tenant_id = ? AND type = 'impression' AND randomized AND ts >= fromUnixTimestamp64Milli(?, 'UTC')
+			WHERE tenant_id = ? AND type = 'impression' AND randomized
+			  AND ts >= fromUnixTimestamp64Milli(?, 'UTC') AND ts < fromUnixTimestamp64Milli(?, 'UTC')
 		) AS i
 		LEFT JOIN (
 			SELECT DISTINCT request_id, product_id, toUInt8(1) AS clicked FROM events FINAL
-			WHERE tenant_id = ? AND type = 'click' AND ts >= fromUnixTimestamp64Milli(?, 'UTC')
+			WHERE tenant_id = ? AND type = 'click'
+			  AND ts >= fromUnixTimestamp64Milli(?, 'UTC') AND ts < fromUnixTimestamp64Milli(?, 'UTC')
 		) AS c ON i.request_id = c.request_id AND i.product_id = c.product_id
 		GROUP BY i.position ORDER BY i.position`,
-		string(tid), from.UnixMilli(), string(tid), from.UnixMilli())
+		string(tid), w.from, w.end, string(tid), w.from, w.end)
 	if err != nil {
 		return features.Propensity{}, "", fmt.Errorf("propensity query: %w", err)
 	}
@@ -236,12 +256,13 @@ const itemColumns = `
 	countIf(type = 'order')`
 
 const itemWhere = `FROM events FINAL
-	WHERE tenant_id = ? AND type IN ('impression', 'click', 'order') AND ts >= fromUnixTimestamp64Milli(?, 'UTC')`
+	WHERE tenant_id = ? AND type IN ('impression', 'click', 'order')
+	  AND ts >= fromUnixTimestamp64Milli(?, 'UTC') AND ts < fromUnixTimestamp64Milli(?, 'UTC')`
 
 // items aggregates every product with events in the window and writes its features.
-func (j *Job) items(ctx context.Context, tid tenant.ID, eta float64, now time.Time) (int, error) {
-	w7, w30 := now.Add(-ShortWindow).UnixMilli(), now.Add(-Window).UnixMilli()
-	args := []any{eta, w7, eta, w7, w7, string(tid), w30}
+func (j *Job) items(ctx context.Context, tid tenant.ID, eta float64, now time.Time, w window) (int, error) {
+	w7 := now.Add(-ShortWindow).UnixMilli()
+	args := []any{eta, w7, eta, w7, w7, string(tid), w.from, w.end}
 	totals, err := j.itemTotals(ctx, args)
 	if err != nil {
 		return 0, err
@@ -363,14 +384,14 @@ func UserFeatures(ins []Interaction, docs map[string]*pipeline.Doc) (features.Us
 
 // users aggregates each user's interactions in the window and writes their features, resolving
 // products against the tenant's catalog a chunk of users at a time.
-func (j *Job) users(ctx context.Context, tid tenant.ID, from time.Time) (int, error) {
+func (j *Job) users(ctx context.Context, tid tenant.ID, w window) (int, error) {
 	rows, err := j.CH.Query(ctx, `
 		SELECT user_id, product_id, toFloat64(sum(multiIf(type = 'order', 3, type = 'add_to_cart', 2, 1)))
 		FROM events FINAL
 		WHERE tenant_id = ? AND user_id != '' AND type IN ('click', 'add_to_cart', 'order')
-		  AND ts >= fromUnixTimestamp64Milli(?, 'UTC')
+		  AND ts >= fromUnixTimestamp64Milli(?, 'UTC') AND ts < fromUnixTimestamp64Milli(?, 'UTC')
 		GROUP BY user_id, product_id
-		ORDER BY user_id`, string(tid), from.UnixMilli())
+		ORDER BY user_id`, string(tid), w.from, w.end)
 	if err != nil {
 		return 0, fmt.Errorf("user query: %w", err)
 	}

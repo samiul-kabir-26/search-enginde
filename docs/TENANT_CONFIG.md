@@ -160,10 +160,14 @@ The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v
 **Scorers:**
 
 ```json
+{ "type": "default_linear", "weights": { ... } }
+{ "type": "onnx", "model": "prerank-gbdt-v1" }
+{ "type": "kserve_v2", "model": "rank-gbdt-v1" }
 { "type": "onnx", "model_id": "01J..." }
 { "type": "kserve_v2", "model_id": "01J..." }
-{ "type": "default_linear", "weights": { ... } }
 ```
+
+`model` names a platform scorer (`docs/MODELS.md` §2: `prerank-gbdt-v1` runs in-process, `rank-gbdt-v1` in Triton); `model_id` a registered model of the stage's kind (`prerank` or `rank`): an uploaded ONNX model or a remote kserve_v2 endpoint (`docs/MODELS.md` §6). Learned scorers take the features their model declares; `policy_boost` is added to their output.
 
 **BYO re-ranker** (replaces the built-in personalization formula; diversity and ads still apply after it):
 
@@ -194,15 +198,17 @@ The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v
 6. Retrievers must be known for the query type, listed once, with `k` in `[1, 2000]` and `weight` in `(0, 5]`; `rrf_k` > 0. Retrievers referenced must be available given the configured embedders and stores. For example, `vector_text_to_image` requires the image embedder to expose a text tower: `clip-vit-b32` does; a BYO embedder must declare `supports_text_to_image: true`.
 
 **Policy**
-7. CEL rules compile in the restricted environment:
-   - Variables: `item` (product payload plus `vendor`) and `query` (normalized text, attributes, predicted categories, user segment).
-   - No custom functions beyond the standard library and `matches`.
-   - `filter` rules must return `bool`; `boost` rules must return `double`.
-   - Maximum 50 rules; each expression ≤ 2 KB; the estimated cost must be under the configured limit.
+7. CEL rules compile in the restricted environment (`internal/providers/policy`), checked on save, validate and publish:
+   - Variables: `item` and `query`, both maps. `item` holds the candidate's ranking fields (`product_id`, `vendor_id`, `brand`, `price_minor`, `category_ids`, `rating`, `rating_count`, `listing_completeness`, `image_count`, `created_at`, `stock`, `status`, `ship_regions`), `item.vendor` (`score`, `on_time_dispatch_rate`, `dispute_rate`, `response_hours` in hours, `verified`; the declared defaults for values the tenant never sent) and `item.custom` (filterable custom fields). `query` holds `text` (normalized), `type`, `categories` (predicted category IDs) and `attributes`. Optional fields a product lacks (`rating`, `stock`, `created_at`, custom fields) are absent: test them with `has(item.rating)`.
+   - Field names are checked: `item.x`, `item.vendor.x`, `item.custom.x` and `query.x` must exist (`unknown_field`), so a typo fails at publish rather than on every candidate.
+   - No custom functions beyond the standard library (which includes `matches`).
+   - `filter` rules must return `bool`; `boost` rules a number (`cel_type`).
+   - Maximum 50 rules; each expression ≤ 2 KB; the estimated worst-case cost (lists of up to 64 items) must be ≤ 2,000 (`cel_cost`), and each evaluation is cut off at the same cost.
+   - At run time S3 drops candidates a filter rejects and sums boosts (clamped to [-1, 1]) into `policy_boost`; a rule that fails on a candidate (missing field, cost) keeps it and adds nothing, and is counted in the trace.
 8. `always_filters` fields must exist in the canonical schema and be indexed for pushdown.
 
 **Scorers and re-ranking**
-9. Every feature in a scorer's feature schema must be resolvable from the feature catalog (`docs/MODELS.md` §4); `default_linear` weights are within `[0, 5]` and cannot use user features (re-rank only).
+9. Every feature in a scorer's feature schema must be resolvable from the feature catalog (`docs/MODELS.md` §4); `default_linear` weights are within `[0, 5]` and cannot use user features (re-rank only). A learned scorer (`onnx` or `kserve_v2`) sets exactly one of `model` (a platform scorer, which must be trained: `model_unavailable`) or `model_id` (a registered model of the stage's kind and the declared type, `validated`; `wrong_kind`, `wrong_type`, `model_not_validated`; a plan with BYO providers); its declared features must resolve and exclude user features. A remote kserve_v2 model is probed live.
 10. `prerank.keep` must be ≥ `rank.keep`, which must be ≥ 10.
 
 **Ads**

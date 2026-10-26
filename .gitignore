@@ -19,10 +19,15 @@ tools/.venv/
 
 # Model artifacts (exported by tools/models and tools/training)
 *.onnx
+# Tiny test models (tools/training/testmodels.py)
+!internal/providers/scorer/onnx/testdata/*.onnx
 deploy/triton/model_repository/*/1/*
 !deploy/triton/model_repository/*/1/model.py
 !deploy/triton/model_repository/*/1/.gitkeep
 deploy/triton/model_repository/SOURCES.json
+# Learned scorers (make train): Triton's rank model and the training outputs
+deploy/triton/model_repository/rank_gbdt_v1/
+tools/training/out/
 
 # Editors and OS
 .idea/

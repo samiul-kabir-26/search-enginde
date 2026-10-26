@@ -3,8 +3,10 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"slices"
 
 	"github.com/zavisoft/search-engine/internal/catalog"
+	"github.com/zavisoft/search-engine/internal/pipeline/feature"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
 	"github.com/zavisoft/search-engine/internal/tenant"
 )
@@ -140,6 +142,49 @@ type FeatureSchema struct {
 	Defaults map[string]float64
 }
 
+// NewFeatureSchema returns a schema over names with the catalog's declared defaults
+// (docs/MODELS.md §4).
+func NewFeatureSchema(names []string) FeatureSchema {
+	all := feature.Defaults()
+	d := make(map[string]float64, len(names))
+	for _, n := range names {
+		d[n] = all[n]
+	}
+	return FeatureSchema{Names: slices.Clone(names), Defaults: d}
+}
+
+// Matrix is the row-major [len(cs), len(Names)] model input: each candidate's features in
+// schema order, missing ones at their default.
+func (s FeatureSchema) Matrix(cs []Candidate) []float32 {
+	out := make([]float32, 0, len(cs)*len(s.Names))
+	for _, c := range cs {
+		for _, n := range s.Names {
+			v, ok := c.Features[n]
+			if !ok {
+				v = s.Defaults[n]
+			}
+			out = append(out, float32(v))
+		}
+	}
+	return out
+}
+
+// PolicyBoostFeature is the CEL boost feature (docs/MODELS.md §4).
+const PolicyBoostFeature = "policy_boost"
+
+// WithPolicyBoost adds each candidate's policy_boost to a learned model's scores unless the
+// model takes it as an input: models are trained without tenant rules, so boosts apply on top
+// of their output (docs/ARCHITECTURE.md §6).
+func (s FeatureSchema) WithPolicyBoost(scores []float32, cs []Candidate) []float32 {
+	if slices.Contains(s.Names, PolicyBoostFeature) {
+		return scores
+	}
+	for i := range scores {
+		scores[i] += float32(cs[i].PolicyBoost)
+	}
+	return scores
+}
+
 // Scorer scores candidates for S4 and S5.
 type Scorer interface {
 	Score(ctx context.Context, q *Query, cs []Candidate) ([]float32, error)
@@ -164,6 +209,9 @@ type FeatureRequest struct {
 type OnlineFeatures struct {
 	Items   map[string]map[string]float64
 	Vendors map[string]map[string]float64
+	// VendorAttrs are the vendors' stored values as sent by the tenant (score, rates,
+	// response_hours in hours, verified as a bool), which CEL rules read as item.vendor.
+	VendorAttrs map[string]map[string]any
 	// User is nil when the request names no user or the user has no stored features.
 	User *UserFeatures
 }
@@ -174,6 +222,14 @@ type UserFeatures struct {
 	CategoryAffinity map[string]float64
 	// PriceLo and PriceHi bound the user's usual price range in minor units (0, 0 = unknown).
 	PriceLo, PriceHi int64
+}
+
+// PolicyEngine evaluates a tenant's compiled CEL rules (S3). item and query are the rule
+// variables; keep is false when a filter rule rejects the item, boost is the clamped sum of
+// boost rules, and errs counts rules that failed to evaluate (they keep the item, add nothing).
+type PolicyEngine interface {
+	Len() int
+	Eval(item, query map[string]any) (keep bool, boost float64, errs int)
 }
 
 // FeatureReader reads online features (PLAN.md R9) in one round trip.
@@ -189,9 +245,11 @@ type Providers struct {
 	Lexical       LexicalIndex
 	Vectors       VectorStore
 	// Centroids is nil until centroids exist for the active index version.
-	Centroids    CentroidIndex
-	Prerank      Scorer
-	Rank         Scorer
+	Centroids CentroidIndex
+	Prerank   Scorer
+	Rank      Scorer
+	// Policy is nil when the config has no CEL rules.
+	Policy       PolicyEngine
 	IndexVersion int
 	// Names label providers in traces and breaker keys, by role
 	// (text_embedder, image_embedder, lexical, vector, prerank, rank).

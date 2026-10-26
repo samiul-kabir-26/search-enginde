@@ -88,7 +88,7 @@ func newHarness(t *testing.T) *harness {
 	b := stagestest.Breakers()
 	fs := features.New(rdb)
 	e, err := pipeline.NewEngine(noop.NewMeterProvider().Meter("t"),
-		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b, fs), rank.New(b), rerank.New())
+		queryunderstanding.New(b), retrieval.New(b), filter.New(b, fs), prerank.New(b, fs), rank.New(b), rerank.New())
 	if err != nil {
 		t.Fatal(err)
 	}

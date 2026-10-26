@@ -23,6 +23,8 @@ import (
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/controlplane"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/providers/scorer/artifacts"
+	"github.com/zavisoft/search-engine/internal/providers/scorer/onnx"
 	"github.com/zavisoft/search-engine/internal/registry"
 	"github.com/zavisoft/search-engine/internal/security"
 	"github.com/zavisoft/search-engine/internal/tenant"
@@ -49,6 +51,9 @@ type config struct {
 	S3AccessKey      string
 	S3SecretKey      string
 	S3UploadBucket   string
+	S3Endpoint       string
+	S3ModelsBucket   string
+	ONNXRuntimeLib   string
 	OTLPEndpoint     string
 	Secrets          security.SecretBackend
 	EgressTrusted    string
@@ -74,6 +79,9 @@ func loadConfig() (config, error) {
 		S3AccessKey:      env.Required("S3_ACCESS_KEY"),
 		S3SecretKey:      env.Required("S3_SECRET_KEY"),
 		S3UploadBucket:   env.Required("S3_BUCKET_UPLOADS"),
+		S3Endpoint:       env.Required("S3_ENDPOINT"),
+		S3ModelsBucket:   env.Required("S3_BUCKET_MODELS"),
+		ONNXRuntimeLib:   env.String("ONNXRUNTIME_LIB", ""),
 		OTLPEndpoint:     env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		Secrets:          security.SecretBackendFromEnv(env),
 		EgressTrusted:    env.String("EGRESS_TRUSTED_HOSTS", ""),
@@ -144,13 +152,24 @@ func run(ctx context.Context) error {
 		Region: cfg.S3Region, BaseEndpoint: aws.String(cfg.S3PublicURL), UsePathStyle: true,
 		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
 	}))
+	// Uploaded ONNX scorers are dry-run at registration; without the runtime they are refused.
+	onnxReady := true
+	if err := onnx.Init(cfg.ONNXRuntimeLib); err != nil {
+		onnxReady = false
+		log.Warn("ONNX Runtime unavailable; ONNX model uploads are disabled", "err", err)
+	}
+	models := &artifacts.Store{Bucket: cfg.S3ModelsBucket, Client: s3.New(s3.Options{
+		Region: cfg.S3Region, BaseEndpoint: aws.String(cfg.S3Endpoint), UsePathStyle: true,
+		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
+	})}
 	srv := &controlplane.Server{
 		DB: db, Q: q, Tenants: tenants, Keys: keys, Verifier: auth.NewLocalVerifier(keys, cfg.JWTIssuer),
 		Settings: settings, Mailer: controlplane.SMTPMailer{Addr: cfg.SMTPAddr, From: cfg.MailFrom}, Redis: rdb,
 		Idem: controlplane.NewIdempotency(rdb), Presign: presign, UploadBucket: cfg.S3UploadBucket,
 		SearchURL: cfg.SearchURL, HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		AppBaseURL: cfg.AppBaseURL, SecureCookies: cfg.AppEnv != "dev",
-		PlatformEmbedder: registry.PlatformEmbedderInfo, BYO: byo, Log: log,
+		PlatformEmbedder: registry.PlatformEmbedderInfo, BYO: byo, Models: models, ModelBucket: cfg.S3ModelsBucket,
+		ONNXReady: onnxReady, Log: log,
 	}
 
 	mux := http.NewServeMux()

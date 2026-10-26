@@ -44,21 +44,22 @@ func Record(topic string, tid tenant.ID, e Event) (*kgo.Record, error) {
 	}, nil
 }
 
-// Producer writes events to the events topic.
+// Producer writes interaction events and the request log.
 type Producer struct {
-	client  *kgo.Client
-	topic   string
-	dropped metric.Int64Counter
+	client   *kgo.Client
+	topic    string
+	requests string
+	dropped  metric.Int64Counter
 }
 
-// NewProducer wraps client for topic.
-func NewProducer(client *kgo.Client, topic string, meter metric.Meter) (*Producer, error) {
+// NewProducer wraps client for the events topic and the request log topic.
+func NewProducer(client *kgo.Client, topic, requests string, meter metric.Meter) (*Producer, error) {
 	dropped, err := meter.Int64Counter("events_dropped_total",
-		metric.WithDescription("Search-emitted events dropped because Kafka was unavailable or the producer buffer was full."))
+		metric.WithDescription("Search-emitted impressions and request records dropped because Kafka was unavailable or the producer buffer was full."))
 	if err != nil {
 		return nil, fmt.Errorf("dropped counter: %w", err)
 	}
-	return &Producer{client: client, topic: topic, dropped: dropped}, nil
+	return &Producer{client: client, topic: topic, requests: requests, dropped: dropped}, nil
 }
 
 // Produce writes evs and waits until Kafka acknowledges all of them (POST /v1/events).
@@ -77,16 +78,15 @@ func (p *Producer) Produce(ctx context.Context, tid tenant.ID, evs []Event) erro
 	return nil
 }
 
-// Emit queues evs without waiting (impressions emitted by search-api). When the client's buffer
-// is full or a write fails, the events are dropped and counted, so a Kafka outage never slows
-// or fails a search.
-func (p *Producer) Emit(tid tenant.ID, evs []Event) {
+// Emit queues a served page's request record and impressions without waiting. When the
+// client's buffer is full or a write fails, records are dropped and counted, so a Kafka outage
+// never slows or fails a search.
+func (p *Producer) Emit(tid tenant.ID, req Request, evs []Event) {
 	attrs := metric.WithAttributes(attribute.String("tenant", string(tid)))
-	for _, e := range evs {
-		r, err := Record(p.topic, tid, e)
+	try := func(r *kgo.Record, err error) {
 		if err != nil {
 			p.dropped.Add(context.Background(), 1, attrs)
-			continue
+			return
 		}
 		// The record outlives the request by design.
 		p.client.TryProduce(context.Background(), r, func(_ *kgo.Record, err error) {
@@ -94,6 +94,10 @@ func (p *Producer) Emit(tid tenant.ID, evs []Event) {
 				p.dropped.Add(context.Background(), 1, attrs)
 			}
 		})
+	}
+	try(RequestRecord(p.requests, tid, req))
+	for _, e := range evs {
+		try(Record(p.topic, tid, e))
 	}
 }
 

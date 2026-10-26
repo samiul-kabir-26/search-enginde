@@ -103,8 +103,8 @@ func NewBYOEmbedder(ctx context.Context, b *BYO, t tenant.ID, plan tenant.Plan, 
 }
 
 // StoreSpec converts a BYO vector store block to the adapters' collection spec.
-func StoreSpec(block tenant.StoreConfig) vectorstore.Spec {
-	spec := vectorstore.Spec{Collection: block.Collection, Fields: block.PayloadMapping, Vectors: map[string]vectorstore.VectorSpec{}}
+func StoreSpec(block tenant.StoreConfig, custom ...string) vectorstore.Spec {
+	spec := vectorstore.Spec{Collection: block.Collection, Fields: block.PayloadMapping, Vectors: map[string]vectorstore.VectorSpec{}, Custom: custom}
 	for name, v := range block.Vectors {
 		spec.Vectors[name] = vectorstore.VectorSpec{Name: v.Name, Dim: v.Dim, Metric: v.Metric}
 	}
@@ -123,8 +123,9 @@ type BYOVectorStore interface {
 }
 
 // NewBYOVectorStore builds the adapter for a connection and a config block. It reads the
-// connection's secret but dials nothing.
-func NewBYOVectorStore(ctx context.Context, b *BYO, t tenant.ID, plan tenant.Plan, conn tenant.Connection, block tenant.StoreConfig) (BYOVectorStore, error) {
+// connection's secret but dials nothing. custom are filterable custom fields read back for
+// CEL policies (canonical `custom.x` names).
+func NewBYOVectorStore(ctx context.Context, b *BYO, t tenant.ID, plan tenant.Plan, conn tenant.Connection, block tenant.StoreConfig, custom ...string) (BYOVectorStore, error) {
 	if conn.Kind != tenant.ConnectionVectorStore {
 		return nil, fmt.Errorf("connection %s is a %s connection, not a vector store", conn.ID, conn.Kind)
 	}
@@ -132,7 +133,7 @@ func NewBYOVectorStore(ctx context.Context, b *BYO, t tenant.ID, plan tenant.Pla
 	if err != nil {
 		return nil, err
 	}
-	allow, plain, spec := plan.EgressAllowlist, b.plaintext(conn.Endpoint), StoreSpec(block)
+	allow, plain, spec := plan.EgressAllowlist, b.plaintext(conn.Endpoint), StoreSpec(block, custom...)
 	switch conn.Type {
 	case tenant.StoreQdrant:
 		c, err := qdrant.DialBYO(conn.Endpoint, secret, plain, b.Egress.GRPCDialer(allow))
@@ -189,7 +190,7 @@ func byoVectors(ctx context.Context, d Deps, s Spec) (any, error) {
 	if conn.Status != tenant.StatusValidated {
 		return &brokenStore{err: fmt.Errorf("connection %s is %s, not validated", conn.ID, conn.Status), name: "byo:" + conn.Type}, nil
 	}
-	st, err := NewBYOVectorStore(ctx, d.BYO, id, s.Resolved.Plan, conn, c)
+	st, err := NewBYOVectorStore(ctx, d.BYO, id, s.Resolved.Plan, conn, c, vectorstore.CustomRankingFields(s.Resolved.Registry)...)
 	if err != nil {
 		return &brokenStore{err: err, name: "byo:" + conn.Type}, nil
 	}

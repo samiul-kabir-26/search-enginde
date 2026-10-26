@@ -89,7 +89,7 @@ func TestRecordCarriesTheTokenTenant(t *testing.T) {
 }
 
 func TestNewProducer(t *testing.T) {
-	p, err := NewProducer(nil, Topic, noop.NewMeterProvider().Meter("t"))
+	p, err := NewProducer(nil, Topic, RequestTopic, noop.NewMeterProvider().Meter("t"))
 	if err != nil || p.topic != Topic {
 		t.Fatalf("%v %+v", err, p)
 	}

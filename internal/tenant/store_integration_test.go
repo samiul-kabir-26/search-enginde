@@ -102,6 +102,7 @@ func TestBYORegistrationsAndConfigsAgainstMySQL(t *testing.T) {
 		Name: "clip", Version: "1", Endpoint: sql.NullString{String: "https://kserve.example.com", Valid: true},
 		InputSchema: []byte(`{"modality":"image"}`), OutputSchema: []byte(`{"dim":512}`),
 		Settings: []byte(`{"transport":"rest","supports_text_to_image":true}`),
+		Status:   tenant.StatusRegistered,
 	}); err != nil {
 		t.Fatal(err)
 	}

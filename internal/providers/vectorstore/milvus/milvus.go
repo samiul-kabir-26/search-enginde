@@ -186,7 +186,7 @@ func (s *Store) vectorField(name string) (vectorstore.VectorSpec, error) {
 
 // outputFields are the stored names of the ranking fields, with their canonical names.
 func (s *Store) outputFields(sch *schemapb.CollectionSchema) (canonical, names []string) {
-	for _, f := range vectorstore.RankingFields {
+	for _, f := range s.spec.RankingFields() {
 		if n := s.spec.Field(f); stored(sch, n) {
 			canonical, names = append(canonical, f), append(names, n)
 		}

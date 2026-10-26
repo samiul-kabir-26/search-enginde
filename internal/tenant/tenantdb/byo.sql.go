@@ -40,24 +40,27 @@ func (q *Queries) CreateTenantConnection(ctx context.Context, arg CreateTenantCo
 }
 
 const createTenantModel = `-- name: CreateTenantModel :exec
-INSERT INTO tenant_models (id, tenant_id, kind, type, name, version, artifact_uri, endpoint, secret_ref,
-  input_schema, output_schema, settings, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registered')
+INSERT INTO tenant_models (id, tenant_id, kind, type, name, version, artifact_uri, artifact_sha256, endpoint,
+  secret_ref, input_schema, output_schema, settings, status, validated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type CreateTenantModelParams struct {
-	ID           string           `json:"id"`
-	TenantID     string           `json:"tenant_id"`
-	Kind         TenantModelsKind `json:"kind"`
-	Type         TenantModelsType `json:"type"`
-	Name         string           `json:"name"`
-	Version      string           `json:"version"`
-	ArtifactUri  sql.NullString   `json:"artifact_uri"`
-	Endpoint     sql.NullString   `json:"endpoint"`
-	SecretRef    sql.NullString   `json:"secret_ref"`
-	InputSchema  json.RawMessage  `json:"input_schema"`
-	OutputSchema json.RawMessage  `json:"output_schema"`
-	Settings     json.RawMessage  `json:"settings"`
+	ID             string           `json:"id"`
+	TenantID       string           `json:"tenant_id"`
+	Kind           TenantModelsKind `json:"kind"`
+	Type           TenantModelsType `json:"type"`
+	Name           string           `json:"name"`
+	Version        string           `json:"version"`
+	ArtifactUri    sql.NullString   `json:"artifact_uri"`
+	ArtifactSha256 sql.NullString   `json:"artifact_sha256"`
+	Endpoint       sql.NullString   `json:"endpoint"`
+	SecretRef      sql.NullString   `json:"secret_ref"`
+	InputSchema    json.RawMessage  `json:"input_schema"`
+	OutputSchema   json.RawMessage  `json:"output_schema"`
+	Settings       json.RawMessage  `json:"settings"`
+	Status         string           `json:"status"`
+	ValidatedAt    sql.NullTime     `json:"validated_at"`
 }
 
 func (q *Queries) CreateTenantModel(ctx context.Context, arg CreateTenantModelParams) error {
@@ -69,11 +72,14 @@ func (q *Queries) CreateTenantModel(ctx context.Context, arg CreateTenantModelPa
 		arg.Name,
 		arg.Version,
 		arg.ArtifactUri,
+		arg.ArtifactSha256,
 		arg.Endpoint,
 		arg.SecretRef,
 		arg.InputSchema,
 		arg.OutputSchema,
 		arg.Settings,
+		arg.Status,
+		arg.ValidatedAt,
 	)
 	return err
 }

@@ -2,6 +2,7 @@ package registry
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -96,9 +97,18 @@ func TestRegistryUnknownTypeAndRefresh(t *testing.T) {
 	r, _, _ := newTestRegistry(t, Options{Size: 64, Refresh: time.Nanosecond})
 	ctx := context.Background()
 	res := resolved(1)
-	res.Config.Rank.Scorer.Type = "onnx"
-	if _, err := r.For(ctx, res); err == nil || !strings.Contains(err.Error(), "onnx") {
+	res.Config.Rank.Scorer.Type = "smoke"
+	if _, err := r.For(ctx, res); err == nil || !strings.Contains(err.Error(), "smoke") {
 		t.Errorf("unregistered type must fail clearly: %v", err)
+	}
+	learned := resolved(2)
+	learned.Config.Rank.Scorer = tenant.ScorerConfig{Type: tenant.ScorerONNX, Model: "prerank-gbdt-v1"}
+	p, err := r.For(ctx, learned)
+	if err != nil {
+		t.Fatalf("a scorer that cannot load must not fail the request: %v", err)
+	}
+	if _, err := p.Rank.Score(ctx, nil, nil); !errors.Is(err, errBYOUnavailable) || p.Names["rank"] != "platform:prerank-gbdt-v1" {
+		t.Errorf("unloadable model: %v (%s)", err, p.Names["rank"])
 	}
 	var centroidBuilds atomic.Int32
 	r.Register(KindCentroids, tenant.ProviderPlatform, func(context.Context, Deps, Spec) (any, error) {

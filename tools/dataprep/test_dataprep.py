@@ -204,6 +204,13 @@ def test_simulate_invariants(raw_dir: Path, tmp_path: Path) -> None:
     assert all(e.get("randomized") for e in impressions if e["request_id"] in randomized)
     assert not any(e.get("randomized") for e in all_events if e["type"] != "impression")
 
+    # The request log has one record per session, with the query that produced its impressions.
+    requests = [json.loads(line) for line in gzip.open(out / "events" / "requests.jsonl.gz", "rt")]
+    assert len(requests) == 100
+    assert {r["request_id"] for r in requests} == {e["request_id"] for e in impressions}
+    assert {r["type"] for r in requests} <= {"text", "browse"}
+    assert all(r["query"] for r in requests)
+
     clicks = [e for e in all_events if e["type"] == "click"]
     carts = [e for e in all_events if e["type"] == "add_to_cart"]
     orders = [e for e in all_events if e["type"] == "order"]

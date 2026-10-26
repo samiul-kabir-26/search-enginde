@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -25,11 +26,27 @@ const (
 // ProductIDField is the canonical payload field holding the product ID.
 const ProductIDField = "product_id"
 
-// RankingFields are the payload fields retrievers read back for ranking; display fields are
-// hydrated per page from the lexical index.
+// RankingFields are the payload fields retrievers read back for ranking and CEL policies;
+// display fields are hydrated per page from the lexical index. Filterable custom fields are read
+// too (Spec.RankingFields).
 var RankingFields = []string{
-	ProductIDField, "vendor_id", "price_minor", "category_ids", "rating", "rating_count",
-	"listing_completeness", "image_count", "created_at",
+	ProductIDField, "vendor_id", "brand", "price_minor", "category_ids", "rating", "rating_count",
+	"listing_completeness", "image_count", "created_at", "stock", "status", "ship_regions",
+}
+
+// CustomRankingFields are the canonical names (`custom.x`) of a registry's filterable custom
+// fields, which retrievers read for CEL policies.
+func CustomRankingFields(r *catalog.Registry) []string {
+	var out []string
+	if r == nil {
+		return nil
+	}
+	for _, f := range r.Filterable() {
+		if f.Custom {
+			out = append(out, f.Name)
+		}
+	}
+	return out
 }
 
 // Payload is the stored payload of p under canonical field names: every filterable field
@@ -112,6 +129,19 @@ func DocFromMap(m map[string]any) (string, *pipeline.Doc) {
 		ts := time.Unix(t, 0).UTC()
 		d.CreatedAt = &ts
 	}
+	d.Brand, d.Status, d.ShipRegions = AsString(m["brand"]), AsString(m["status"]), AsStrings(m["ship_regions"])
+	if v, ok := m["stock"]; ok && v != nil {
+		s := AsInt(v)
+		d.Stock = &s
+	}
+	for k, v := range m {
+		if name, ok := strings.CutPrefix(k, catalog.CustomPrefix); ok && v != nil {
+			if d.Custom == nil {
+				d.Custom = map[string]any{}
+			}
+			d.Custom[name] = v
+		}
+	}
 	return AsString(m[ProductIDField]), d
 }
 
@@ -185,7 +215,13 @@ type Spec struct {
 	// Fields maps canonical payload fields (product_id, brand, custom.season, ...) to store
 	// fields; unmapped fields keep their canonical names.
 	Fields map[string]string
+	// Custom are the canonical names of the tenant's filterable custom fields, read back with
+	// the ranking fields.
+	Custom []string
 }
+
+// RankingFields are the canonical fields retrievers read: RankingFields plus Custom.
+func (s Spec) RankingFields() []string { return append(slices.Clone(RankingFields), s.Custom...) }
 
 // VectorSpec is one named vector of a BYO collection.
 type VectorSpec struct {

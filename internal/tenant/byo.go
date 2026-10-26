@@ -47,11 +47,30 @@ type Model struct {
 	Input    ModelInput
 	Output   ModelOutput
 	Settings ModelSettings
+	// ArtifactURI is an ONNX model's key in the models bucket; ArtifactSHA256 its digest.
+	ArtifactURI    string
+	ArtifactSHA256 string
 }
 
-// ModelInput is an embedder's declared input schema.
+// Model kinds besides embedder: the stage a scorer serves.
+const (
+	ModelKindEmbedder = "embedder"
+	ModelKindPrerank  = "prerank"
+	ModelKindRank     = "rank"
+	ModelKindRerank   = "rerank"
+)
+
+// ScorerInfo is what validation needs about a learned scorer: its type and feature schema.
+type ScorerInfo struct {
+	Type     string
+	Features []string
+}
+
+// ModelInput is a model's declared input: an embedder's modality, or a scorer's ordered
+// feature schema (names from the feature catalog, docs/MODELS.md §4).
 type ModelInput struct {
-	Modality string `json:"modality"`
+	Modality string   `json:"modality,omitempty"`
+	Features []string `json:"features,omitempty"`
 }
 
 // ModelOutput is an embedder's declared output schema.
@@ -86,7 +105,8 @@ func decodeLoose(raw json.RawMessage, dst any) error {
 // ModelFromRow converts a tenant_models row.
 func ModelFromRow(r tenantdb.TenantModel) (Model, error) {
 	m := Model{ID: r.ID, Kind: string(r.Kind), Type: string(r.Type), Name: r.Name, Version: r.Version,
-		Endpoint: r.Endpoint.String, SecretRef: r.SecretRef.String, Status: r.Status}
+		Endpoint: r.Endpoint.String, SecretRef: r.SecretRef.String, Status: r.Status,
+		ArtifactURI: r.ArtifactUri.String, ArtifactSHA256: r.ArtifactSha256.String}
 	if err := decodeLoose(r.InputSchema, &m.Input); err != nil {
 		return m, fmt.Errorf("model %s input_schema: %w", r.ID, err)
 	}
@@ -171,4 +191,8 @@ type BYOChecker interface {
 	// collection: dimensions and metrics as declared and supported, and the fields filters must
 	// be pushed down on (filterFields, canonical names) present.
 	VectorStore(ctx context.Context, block StoreConfig, filterFields []string) []platform.FieldError
+	// Scorer checks that a model exists, belongs to the tenant, is a validated model of kind
+	// (prerank or rank), and for kserve_v2 answers a live probe; it returns the model's type
+	// and feature schema.
+	Scorer(ctx context.Context, modelID, kind string) (ScorerInfo, []platform.FieldError)
 }

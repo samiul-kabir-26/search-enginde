@@ -97,8 +97,9 @@ The goal is a learnable ranking signal, not noise.
 **Outputs.**
 - Events are written as gzipped JSONL in the `/v1/events` schema (`data/events/part-*.jsonl.gz`); clicks follow their impression by 2–60 s, carts and orders shortly after.
 - Event IDs are drawn from the seeded RNG and the gzip headers carry no timestamp, so the same seed gives byte-identical files (pytest checks this). The full run takes about 2.5 minutes.
+- `data/events/requests.jsonl.gz` is the matching request log: one record per session with its text query (or the browsed category, type `browse`), in the `search.requests.v1` format search-api writes.
 - The generator parameters, including the hidden ones, are stored in `data/simulation_params.json` for reproducibility.
-- `make seed-events` (`seed -events`) publishes the events to `search.events.v1`, shifting every timestamp so `--ref-date` lands on the current time; the 7- and 30-day feature windows are then populated whenever the stack is seeded. ClickHouse ingests them through the Kafka engine, and `make features` (or the scheduled featurejob) turns them into online features.
+- `make seed-events` (`seed -events`) publishes the events to `search.events.v1` and the request log to `search.requests.v1`, shifting every timestamp so `--ref-date` lands on the current time; the 7- and 30-day feature windows are then populated whenever the stack is seeded. ClickHouse ingests them through the Kafka engine, and `make features` (or the scheduled featurejob) turns them into online features.
 
 ## 6. Vectorization and indexing
 
@@ -182,6 +183,8 @@ data/
   users.jsonl                # hidden user ground truth (simulate.py)
   campaigns.jsonl
   events/part-*.jsonl.gz     # simulated interaction events (simulate.py)
+  events/requests.jsonl.gz   # their request log (simulate.py)
+  training/{tenant}.csv.gz   # learning-to-rank dataset (featurejob dataset, make train)
   images/{image_id}.jpg
   eval/image_queries.jsonl
   eval/text_queries.jsonl

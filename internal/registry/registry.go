@@ -18,6 +18,8 @@ import (
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/providers/embedder/kservev2"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
+	"github.com/zavisoft/search-engine/internal/providers/policy"
+	"github.com/zavisoft/search-engine/internal/providers/scorer/artifacts"
 	"github.com/zavisoft/search-engine/internal/providers/scorer/defaultlinear"
 	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
 	"github.com/zavisoft/search-engine/internal/tenant"
@@ -29,6 +31,10 @@ type Platform struct {
 	OpenSearch *opensearchapi.Client
 	Qdrant     *qdrantgo.Client
 	Centroids  *centroids.Store
+	// Models holds learned scorer artifacts (platform models and tenant uploads).
+	Models *artifacts.Store
+	// ONNXThreads bounds the intra-op threads of one in-process scorer inference.
+	ONNXThreads int
 }
 
 // Deps is what factories may use: the platform clients, and for BYO providers the egress
@@ -46,6 +52,7 @@ const (
 	KindVectorStore = "vector_store"
 	KindScorer      = "scorer"
 	KindCentroids   = "centroids"
+	KindPolicy      = "policy"
 )
 
 // Spec is what a factory builds from: the role's config block and the tenant version.
@@ -129,7 +136,10 @@ func New(p Platform, opts Options, log *slog.Logger) *Registry {
 	r.Register(KindLexical, tenant.ProviderPlatform, platformLexical)
 	r.Register(KindVectorStore, tenant.ProviderPlatform, platformVectors)
 	r.Register(KindScorer, tenant.ScorerDefaultLinear, defaultLinear)
+	r.Register(KindScorer, tenant.ScorerONNX, onnxScorer)
+	r.Register(KindScorer, tenant.ScorerKServeV2, kserveScorer)
 	r.Register(KindCentroids, tenant.ProviderPlatform, platformCentroids)
+	r.Register(KindPolicy, "cel", celPolicy)
 	if opts.BYO != nil {
 		r.Register(KindEmbedder, tenant.ProviderBYO, byoEmbedder)
 		r.Register(KindVectorStore, tenant.ProviderBYO, byoVectors)
@@ -223,7 +233,7 @@ func (r *Registry) get(ctx context.Context, res *tenant.Resolved, role, kind, ty
 	}
 	f, ok := r.factories[factoryKey{kind, typ}]
 	if !ok {
-		return nil, fmt.Errorf("%s: no %s provider of type %q (BYO scorers arrive in M7)", role, kind, typ)
+		return nil, fmt.Errorf("%s: no %s provider of type %q", role, kind, typ)
 	}
 	v, err := f(ctx, r.deps, Spec{Role: role, Resolved: res, Block: block, Dims: dims})
 	if err != nil {
@@ -242,6 +252,15 @@ func (r *Registry) get(ctx context.Context, res *tenant.Resolved, role, kind, ty
 	}
 	r.cache.Add(k, e)
 	return v, nil
+}
+
+// scorerProvider is byo for a tenant's registered model, so it is refreshed like other BYO
+// providers (model edits, secret rotation).
+func scorerProvider(c tenant.ScorerConfig) string {
+	if c.ModelID != "" {
+		return tenant.ProviderBYO
+	}
+	return tenant.ProviderPlatform
 }
 
 func (r *Registry) ttlFor(provider string) time.Duration {
@@ -286,11 +305,11 @@ func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Pro
 	if err != nil {
 		return nil, err
 	}
-	pre, err := r.get(ctx, res, "prerank", KindScorer, cfg.Prerank.Scorer.Type, cfg.Prerank, nil, 0)
+	pre, err := r.get(ctx, res, "prerank", KindScorer, cfg.Prerank.Scorer.Type, cfg.Prerank, nil, r.ttlFor(scorerProvider(cfg.Prerank.Scorer)))
 	if err != nil {
 		return nil, err
 	}
-	rank, err := r.get(ctx, res, "rank", KindScorer, cfg.Rank.Scorer.Type, cfg.Rank, nil, 0)
+	rank, err := r.get(ctx, res, "rank", KindScorer, cfg.Rank.Scorer.Type, cfg.Rank, nil, r.ttlFor(scorerProvider(cfg.Rank.Scorer)))
 	if err != nil {
 		return nil, err
 	}
@@ -301,12 +320,20 @@ func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Pro
 			"text_embedder":  nameOf(te, cfg.Embedders.Text.Provider+":"+cfg.Embedders.Text.Model),
 			"image_embedder": nameOf(ie, cfg.Embedders.Image.Provider+":"+cfg.Embedders.Image.Model),
 			"lexical":        cfg.Stores.Lexical.Provider + ":opensearch", "vector": nameOf(vec, cfg.Stores.Vector.Provider+":qdrant"),
-			"prerank": cfg.Prerank.Scorer.Type, "rank": cfg.Rank.Scorer.Type,
+			"prerank": nameOf(pre, cfg.Prerank.Scorer.Type), "rank": nameOf(rank, cfg.Rank.Scorer.Type),
 		},
 		BYO: map[string]bool{
 			"text_embedder": cfg.Embedders.Text.Provider == tenant.ProviderBYO, "image_embedder": cfg.Embedders.Image.Provider == tenant.ProviderBYO,
-			"vector": cfg.Stores.Vector.Provider == tenant.ProviderBYO,
+			"vector":  cfg.Stores.Vector.Provider == tenant.ProviderBYO,
+			"prerank": cfg.Prerank.Scorer.ModelID != "", "rank": cfg.Rank.Scorer.ModelID != "",
 		},
+	}
+	if len(cfg.Policy.Rules) > 0 {
+		pol, err := r.get(ctx, res, "policy", KindPolicy, "cel", cfg.Policy, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		p.Policy = pol.(pipeline.PolicyEngine)
 	}
 	ce, err := r.get(ctx, res, "centroids", KindCentroids, cfg.Stores.Lexical.Provider, lex, nil, r.refresh)
 	if err == nil {
@@ -377,6 +404,18 @@ func platformCentroids(ctx context.Context, d Deps, s Spec) (any, error) {
 	}
 	return e, nil
 }
+
+// celPolicy compiles the config's CEL rules (validated at publish, so errors here mean a
+// version published before the rules were enforced).
+func celPolicy(_ context.Context, _ Deps, s Spec) (any, error) {
+	set, errs := policy.Compile(s.Resolved.Config.Policy.Rules, s.Resolved.Config.Catalog.CustomFieldNames())
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("policy rules: %w", errs[0])
+	}
+	return set, nil
+}
+
+var _ pipeline.PolicyEngine = (*policy.Set)(nil)
 
 // PlatformEmbedderInfo describes platform models for config validation.
 func PlatformEmbedderInfo(id string) (tenant.EmbedderInfo, bool) {

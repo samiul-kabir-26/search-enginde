@@ -30,6 +30,7 @@ func (s *Server) byoRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/tenants/{tid}/connections/{connection_id}/test", s.tenantRoute(auth.ScopeTenantWrite, s.handleTestConnection))
 	mux.Handle("GET /v1/tenants/{tid}/models", s.tenantRoute(auth.ScopeTenantRead, s.handleListModels))
 	mux.Handle("POST /v1/tenants/{tid}/models", s.tenantRoute(auth.ScopeTenantWrite, s.tenantIdem(s.handleRegisterModel).ServeHTTP))
+	mux.Handle("POST /v1/tenants/{tid}/models/uploads", s.tenantRoute(auth.ScopeTenantWrite, s.tenantIdem(s.handleModelUpload).ServeHTTP))
 	mux.Handle("GET /v1/tenants/{tid}/models/{model_id}", s.tenantRoute(auth.ScopeTenantRead, s.handleGetModel))
 	mux.Handle("POST /v1/tenants/{tid}/models/{model_id}/validate", s.tenantRoute(auth.ScopeTenantWrite, s.handleValidateModel))
 	mux.HandleFunc("GET /v1/platform/models", s.handlePlatformModels)
@@ -440,6 +441,7 @@ type ModelView struct {
 	Transport           string             `json:"transport,omitempty"`
 	InputSchema         tenant.ModelInput  `json:"input_schema"`
 	OutputSchema        tenant.ModelOutput `json:"output_schema"`
+	ArtifactSHA256      string             `json:"artifact_sha256,omitempty"`
 	Status              string             `json:"status"`
 	ValidatedAt         *time.Time         `json:"validated_at"`
 	LastError           *string            `json:"last_error"`
@@ -453,7 +455,7 @@ func modelView(row tenantdb.TenantModel) (ModelView, error) {
 	}
 	v := ModelView{ID: m.ID, Kind: m.Kind, Type: m.Type, Name: m.Name, Version: m.Version, Endpoint: m.Endpoint, SecretRef: m.SecretRef,
 		SupportsTextToImage: m.Settings.SupportsTextToImage, MaxBatchSize: m.Settings.MaxBatchSize, Transport: m.Settings.Transport,
-		InputSchema: m.Input, OutputSchema: m.Output, Status: m.Status, CreatedAt: row.CreatedAt}
+		InputSchema: m.Input, OutputSchema: m.Output, ArtifactSHA256: m.ArtifactSHA256, Status: m.Status, CreatedAt: row.CreatedAt}
 	if row.ValidatedAt.Valid {
 		v.ValidatedAt = &row.ValidatedAt.Time
 	}
@@ -473,7 +475,7 @@ func (s *Server) handleRegisterModel(w http.ResponseWriter, r *http.Request) {
 		Name                string             `json:"name"`
 		Version             string             `json:"version"`
 		Endpoint            string             `json:"endpoint"`
-		ArtifactURI         string             `json:"artifact_uri"`
+		UploadID            string             `json:"upload_id"`
 		SecretRef           string             `json:"secret_ref"`
 		SupportsTextToImage bool               `json:"supports_text_to_image"`
 		MaxBatchSize        int                `json:"max_batch_size"`
@@ -483,16 +485,21 @@ func (s *Server) handleRegisterModel(w http.ResponseWriter, r *http.Request) {
 	if !decodeOrFail(w, r, &in) {
 		return
 	}
-	var errs []platform.FieldError
-	if in.Kind != "embedder" {
-		errs = append(errs, fieldErr("/kind", "not_available", "prerank, rank and rerank models arrive with learned ranking (M7); register embedders"))
+	switch in.Kind {
+	case tenant.ModelKindEmbedder:
+	case tenant.ModelKindPrerank, tenant.ModelKindRank, tenant.ModelKindRerank:
+		s.registerScorer(w, r, scorerRequest{Kind: in.Kind, Type: in.Type, Name: in.Name, Version: in.Version, Endpoint: in.Endpoint,
+			SecretRef: in.SecretRef, UploadID: in.UploadID, Features: in.InputSchema.Features})
+		return
+	default:
+		invalid(w, fieldErr("/kind", "invalid", "kind must be embedder, prerank, rank or rerank"))
+		return
 	}
+	var errs []platform.FieldError
 	switch in.Type {
 	case tenant.ModelKServeV2, tenant.ModelOpenAIEmbeddings:
-	case tenant.ModelONNX:
-		errs = append(errs, fieldErr("/type", "not_available", "ONNX uploads arrive with learned ranking (M7)"))
 	default:
-		errs = append(errs, fieldErr("/type", "invalid", "type must be kserve_v2 or openai_embeddings"))
+		errs = append(errs, fieldErr("/type", "invalid", "embedders are kserve_v2 or openai_embeddings"))
 	}
 	if in.Name == "" || len(in.Name) > 255 {
 		errs = append(errs, fieldErr("/name", "invalid", "name must be 1 to 255 characters (the KServe model name, or the embeddings `model`)"))
@@ -500,8 +507,11 @@ func (s *Server) handleRegisterModel(w http.ResponseWriter, r *http.Request) {
 	if len(in.Version) > 64 {
 		errs = append(errs, fieldErr("/version", "invalid", "version must be at most 64 characters"))
 	}
-	if in.ArtifactURI != "" {
-		errs = append(errs, fieldErr("/artifact_uri", "not_available", "artifacts are for ONNX models (M7)"))
+	if in.UploadID != "" {
+		errs = append(errs, fieldErr("/upload_id", "invalid", "uploads are for ONNX scorer models"))
+	}
+	if len(in.InputSchema.Features) > 0 {
+		errs = append(errs, fieldErr("/input_schema/features", "invalid", "features are for scorer models"))
 	}
 	switch in.InputSchema.Modality {
 	case tenant.ModalityText:
@@ -547,6 +557,7 @@ func (s *Server) handleRegisterModel(w http.ResponseWriter, r *http.Request) {
 		Name: in.Name, Version: in.Version, Endpoint: nullString(in.Endpoint), SecretRef: nullString(in.SecretRef),
 		InputSchema: settingsJSON(in.InputSchema), OutputSchema: settingsJSON(in.OutputSchema),
 		Settings: settingsJSON(tenant.ModelSettings{MaxBatchSize: in.MaxBatchSize, SupportsTextToImage: in.SupportsTextToImage}),
+		Status:   tenant.StatusRegistered,
 	})
 	if err != nil {
 		s.internalError(w, err)
@@ -608,7 +619,11 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	res, settings := s.validateModel(r.Context(), tid, plan, m)
+	validate := s.validateModel
+	if m.Kind != tenant.ModelKindEmbedder {
+		validate = s.validateScorer
+	}
+	res, settings := validate(r.Context(), tid, plan, m)
 	status, lastErr, validatedAt := tenant.StatusValidated, sql.NullString{}, sql.NullTime{Time: time.Now().UTC(), Valid: true}
 	if !res.OK {
 		status, lastErr, validatedAt = tenant.StatusFailed, sql.NullString{String: res.firstError(), Valid: true}, sql.NullTime{}
@@ -623,21 +638,25 @@ func (s *Server) handleValidateModel(w http.ResponseWriter, r *http.Request) {
 	platform.WriteJSON(w, http.StatusOK, res)
 }
 
-// PlatformModelView describes a platform model tenants can select.
+// PlatformModelView describes a platform model tenants can select: an embedder (modality,
+// dim) or a scorer (type, feature schema, and whether it has been trained yet).
 type PlatformModelView struct {
-	ID                  string `json:"id"`
-	Kind                string `json:"kind"`
-	Modality            string `json:"modality"`
-	Dim                 int    `json:"dim"`
-	SupportsTextToImage bool   `json:"supports_text_to_image"`
-	Description         string `json:"description"`
+	ID                  string   `json:"id"`
+	Kind                string   `json:"kind"`
+	Type                string   `json:"type,omitempty"`
+	Modality            string   `json:"modality,omitempty"`
+	Dim                 int      `json:"dim,omitempty"`
+	SupportsTextToImage bool     `json:"supports_text_to_image,omitempty"`
+	Available           bool     `json:"available"`
+	Features            []string `json:"features,omitempty"`
+	Description         string   `json:"description"`
 }
 
-func (s *Server) handlePlatformModels(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handlePlatformModels(w http.ResponseWriter, r *http.Request) {
 	items := []PlatformModelView{
-		{ID: "bge-small-en-v1.5", Kind: "embedder", Modality: tenant.ModalityText, Dim: 384,
+		{ID: "bge-small-en-v1.5", Kind: "embedder", Modality: tenant.ModalityText, Dim: 384, Available: true,
 			Description: "BAAI/bge-small-en-v1.5 (MIT): English text embeddings for semantic retrieval."},
-		{ID: "clip-vit-b32", Kind: "embedder", Modality: tenant.ModalityImage, Dim: 512, SupportsTextToImage: true,
+		{ID: "clip-vit-b32", Kind: "embedder", Modality: tenant.ModalityImage, Dim: 512, SupportsTextToImage: true, Available: true,
 			Description: "laion/CLIP-ViT-B-32-laion2B-s34B-b79K (MIT): image embeddings, plus text-to-image search through its text tower."},
 	}
 	for _, m := range items {
@@ -647,6 +666,7 @@ func (s *Server) handlePlatformModels(w http.ResponseWriter, _ *http.Request) {
 			}
 		}
 	}
+	items = append(items, s.platformScorerViews(r.Context())...)
 	platform.WriteJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 

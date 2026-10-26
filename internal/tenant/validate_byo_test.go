@@ -2,6 +2,7 @@ package tenant
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/zavisoft/search-engine/internal/platform"
@@ -10,6 +11,7 @@ import (
 // fakeChecker answers like the control plane's live checker.
 type fakeChecker struct {
 	models      map[string]EmbedderInfo
+	scorers     map[string]ScorerInfo
 	storeErrs   []platform.FieldError
 	gotFields   []string
 	storeCalled bool
@@ -26,6 +28,14 @@ func (f *fakeChecker) Embedder(_ context.Context, id string) (EmbedderInfo, []pl
 func (f *fakeChecker) VectorStore(_ context.Context, _ StoreConfig, fields []string) []platform.FieldError {
 	f.storeCalled, f.gotFields = true, fields
 	return f.storeErrs
+}
+
+func (f *fakeChecker) Scorer(_ context.Context, id, kind string) (ScorerInfo, []platform.FieldError) {
+	info, ok := f.scorers[kind+"/"+id]
+	if !ok {
+		return ScorerInfo{}, []platform.FieldError{{Path: "/model_id", Code: "not_found", Message: "no such " + kind + " model"}}
+	}
+	return info, nil
 }
 
 func byoConfig(t *testing.T) *Config {
@@ -91,5 +101,69 @@ func TestValidateBYOProviders(t *testing.T) {
 	starter.Plan = Plan{ID: "starter", MaxTotalMS: 300, BYOAllowed: false}
 	if got := codes(byoConfig(t).Validate(context.Background(), starter)); got["/stores/vector/provider"] != "plan_forbids_byo" || got["/embedders/text/provider"] != "plan_forbids_byo" {
 		t.Errorf("plans without BYO: %v", got)
+	}
+}
+
+func TestValidateLearnedScorers(t *testing.T) {
+	platformScorers := func(_ context.Context, id string) (ScorerInfo, error) {
+		switch id {
+		case "prerank-gbdt-v1":
+			return ScorerInfo{Type: ScorerONNX, Features: []string{"rrf_score", "ctr_7d"}}, nil
+		case "rank-gbdt-v1":
+			return ScorerInfo{Type: ScorerKServeV2, Features: []string{"rrf_score", "vendor_score"}}, nil
+		}
+		return ScorerInfo{}, errors.New(id + " has not been trained yet")
+	}
+	checker := &fakeChecker{scorers: map[string]ScorerInfo{
+		"prerank/up1":  {Type: ScorerONNX, Features: []string{"bm25_norm"}},
+		"rank/remote1": {Type: ScorerKServeV2, Features: []string{"rrf_score", "user_price_band_match"}},
+	}}
+	deps := ValidationDeps{Plan: growth, PlatformEmbedder: platformModels, PlatformScorer: platformScorers, BYO: checker}
+	c := defaultConfig(t)
+	c.Prerank.Scorer = ScorerConfig{Type: ScorerONNX, Model: "prerank-gbdt-v1"}
+	c.Rank.Scorer = ScorerConfig{Type: ScorerKServeV2, Model: "rank-gbdt-v1"}
+	if errs := c.Validate(context.Background(), deps); len(errs) > 0 {
+		t.Fatalf("platform learned scorers: %+v", errs)
+	}
+	c.Prerank.Scorer = ScorerConfig{Type: ScorerONNX, ModelID: "up1"}
+	if errs := c.Validate(context.Background(), deps); len(errs) > 0 {
+		t.Fatalf("tenant ONNX prerank: %+v", errs)
+	}
+
+	for name, tc := range map[string]struct {
+		prerank, rank ScorerConfig
+		plan          Plan
+		want          map[string]string
+	}{
+		"both set":        {prerank: ScorerConfig{Type: ScorerONNX, Model: "prerank-gbdt-v1", ModelID: "up1"}, want: map[string]string{"/prerank/scorer": "invalid"}},
+		"neither":         {rank: ScorerConfig{Type: ScorerKServeV2}, want: map[string]string{"/rank/scorer": "invalid"}},
+		"wrong type":      {prerank: ScorerConfig{Type: ScorerKServeV2, Model: "prerank-gbdt-v1"}, want: map[string]string{"/prerank/scorer/model": "wrong_type"}},
+		"untrained":       {rank: ScorerConfig{Type: ScorerKServeV2, Model: "rank-gbdt-v2"}, want: map[string]string{"/rank/scorer/model": "model_unavailable"}},
+		"wrong stage":     {rank: ScorerConfig{Type: ScorerONNX, ModelID: "up1"}, want: map[string]string{"/rank/scorer/model_id": "not_found"}},
+		"user features":   {rank: ScorerConfig{Type: ScorerKServeV2, ModelID: "remote1"}, want: map[string]string{"/rank/scorer/model_id": "unavailable"}},
+		"weights":         {rank: ScorerConfig{Type: ScorerKServeV2, Model: "rank-gbdt-v1", Weights: map[string]float64{"x": 1}}, want: map[string]string{"/rank/scorer/weights": "invalid"}},
+		"starter plan":    {prerank: ScorerConfig{Type: ScorerONNX, ModelID: "up1"}, plan: Plan{ID: "starter", MaxTotalMS: 300, MaxPageDepth: 500}, want: map[string]string{"/prerank/scorer/model_id": "plan_forbids_byo"}},
+		"linear w/ model": {rank: ScorerConfig{Type: ScorerDefaultLinear, Model: "rank-gbdt-v1"}, want: map[string]string{"/rank/scorer": "invalid"}},
+	} {
+		c := defaultConfig(t)
+		if tc.prerank.Type != "" {
+			c.Prerank.Scorer = tc.prerank
+		}
+		if tc.rank.Type != "" {
+			c.Rank.Scorer = tc.rank
+		}
+		d := deps
+		if tc.plan.ID != "" {
+			d.Plan = tc.plan
+		}
+		got := map[string]string{}
+		for _, e := range c.Validate(context.Background(), d) {
+			got[e.Path] = e.Code
+		}
+		for path, code := range tc.want {
+			if got[path] != code {
+				t.Errorf("%s: %s = %q, want %q (all: %v)", name, path, got[path], code, got)
+			}
+		}
 	}
 }

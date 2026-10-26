@@ -188,7 +188,7 @@ func decodeVector(s string) ([]float32, error) {
 
 // rankingColumns returns the stored ranking fields that exist, with their canonical names.
 func (s *Store) rankingColumns(cols map[string]column) (canonical, stored []string) {
-	for _, f := range vectorstore.RankingFields {
+	for _, f := range s.spec.RankingFields() {
 		if c := s.spec.Field(f); hasColumn(cols, c) {
 			canonical, stored = append(canonical, f), append(stored, c)
 		}

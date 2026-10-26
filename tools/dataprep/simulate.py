@@ -6,6 +6,8 @@ Reads data/products.canonical.jsonl and data/hidden/item_quality.jsonl, and writ
 - data/users.jsonl (hidden ground truth: affinities, price band, region; never used as features)
 - data/events/part-*.jsonl.gz (~2M impressions plus clicks, carts and orders, in the
   POST /v1/events schema; impressions of the 10% randomized sessions carry "randomized": true)
+- data/events/requests.jsonl.gz (one request-log record per session: its text query, or the
+  category of a browse session)
 - data/simulation_params.json
 and records the results in data/MANIFEST.json. Event IDs come from the seeded RNG, so the same
 seed produces byte-identical files. Timestamps end at --ref-date; `seed --events` shifts them to
@@ -268,6 +270,12 @@ def main():
         part_files.append(pf)
         # mtime=0 keeps the gzip header, and so the file hash, identical across runs.
         part_writers.append(io.TextIOWrapper(gzip.GzipFile(pf, "wb", mtime=0), encoding="utf-8"))
+    # One request-log record per session (seed -events publishes it to
+    # search.requests.v1), so training can recover each request's query.
+    requests_file = events_dir / "requests.jsonl.gz"
+    requests_writer = io.TextIOWrapper(
+        gzip.GzipFile(requests_file, "wb", mtime=0), encoding="utf-8"
+    )
 
     total_impressions = 0
     total_clicks = 0
@@ -289,6 +297,16 @@ def main():
 
             is_browse = rng.random() < 0.30
             candidate_indices = []
+            request = {
+                "request_id": req_id,
+                "ts": ts_iso,
+                "type": "browse",
+                "query": "",
+                "user_id": uid,
+                "session_id": sid,
+                "page_offset": 0,
+                "results": 50,
+            }
 
             if is_browse:
                 # Browse top category from user affinity or random
@@ -300,6 +318,7 @@ def main():
                 if len(pool) >= 50:
                     chosen = rng.choice(pool, size=50, replace=False)
                     candidate_indices = [(int(idx), 0.8) for idx in chosen]
+                    request["query"] = cat
                 elif pool:
                     candidate_indices = [(int(idx), 0.8) for idx in pool]
 
@@ -317,6 +336,7 @@ def main():
                 else:
                     q = "goods"
 
+                request["type"], request["query"] = "text", q
                 tokens = tokenize(q)
                 hits = bm25_search(bm25, tokens, top_k=50)
                 max_bm25 = hits[0][1] if hits else 1.0
@@ -432,10 +452,12 @@ def main():
 
             for ev in session_events:
                 part_target.write(json.dumps(ev) + "\n")
+            requests_writer.write(json.dumps(request) + "\n")
 
     finally:
         for w in part_writers:
             w.close()
+        requests_writer.close()
 
     # Write simulation parameters
     sim_params = {
@@ -466,7 +488,7 @@ def main():
         args.data,
         "simulate",
         sim_params,
-        [users_file, sim_file, *part_files],
+        [users_file, sim_file, *part_files, requests_file],
     )
 
     print("Simulation completed:")
