@@ -1,6 +1,6 @@
 -- Interaction events (docs/API.md §1 POST /v1/events). ReplacingMergeTree
 -- collapses duplicate event_id rows on merge, so query with FINAL for exact dedup.
--- The Kafka engine table and materialized view that feed this table land in M6.
+-- Migration 000003 adds the Kafka engine table and materialized view that feed this table.
 CREATE TABLE IF NOT EXISTS events
 (
     tenant_id    LowCardinality(String),

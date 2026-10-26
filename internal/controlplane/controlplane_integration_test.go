@@ -407,7 +407,18 @@ func TestControlPlane(t *testing.T) {
 		if errorCodes(bad)["/field_mapping/vendor_id"] != "required" {
 			t.Errorf("catalog errors = %s", bad.raw)
 		}
-		c.expect(http.StatusOK, c.do("PUT", ob+"/steps/catalog", map[string]any{"ingestion": "upload", "field_mapping": mapping, "samples": []any{sample}}), "catalog")
+		badVendor := c.expect(http.StatusBadRequest, c.do("PUT", ob+"/steps/catalog", map[string]any{"ingestion": "upload", "field_mapping": mapping,
+			"vendor_mapping": map[string]any{"response_hours": map[string]any{"path": "$.vendor.h", "min": 0, "max": 48}}, "samples": []any{sample}}), "ranged hours")
+		if errorCodes(badVendor)["/vendor_mapping/response_hours"] != "invalid" {
+			t.Errorf("vendor mapping errors = %s", badVendor.raw)
+		}
+		c.expect(http.StatusOK, c.do("PUT", ob+"/steps/catalog", map[string]any{"ingestion": "upload", "field_mapping": mapping,
+			"vendor_mapping": map[string]any{"score": map[string]any{"path": "$.vendor.rating", "min": 0, "max": 5}}, "samples": []any{sample}}), "catalog")
+		d := c.expect(http.StatusOK, c.do("GET", "/v1/tenants/"+otid+"/config/draft", nil), "draft")
+		vendorMap, _ := d.body["document"].(map[string]any)["catalog"].(map[string]any)["vendor_mapping"].(map[string]any)
+		if score, _ := vendorMap["score"].(map[string]any); score["path"] != "$.vendor.rating" || score["max"] != 5.0 {
+			t.Errorf("the catalog step must keep vendor_mapping in the draft: %s", d.raw)
+		}
 		c.expect(http.StatusBadRequest, c.do("PUT", ob+"/steps/retrieval", map[string]any{"preset": "magic"}), "bad preset")
 		c.expect(http.StatusOK, c.do("PUT", ob+"/steps/retrieval", map[string]any{"preset": "semantic"}), "retrieval")
 		r = c.expect(http.StatusOK, c.do("PUT", ob+"/steps/policies?use_defaults=true", nil), "use defaults")

@@ -21,6 +21,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/providers/features"
 	"github.com/zavisoft/search-engine/internal/stages/filter"
 	"github.com/zavisoft/search-engine/internal/stages/prerank"
 	"github.com/zavisoft/search-engine/internal/stages/queryunderstanding"
@@ -70,12 +71,14 @@ func (c *countingEngine) Run(ctx context.Context, res *tenant.Resolved, p *pipel
 }
 
 type harness struct {
-	svc    *Service
-	srv    *httptest.Server
-	signer *auth.Signer
-	engine *countingEngine
-	res    *tenant.Resolved
-	redis  *miniredis.Miniredis
+	svc      *Service
+	srv      *httptest.Server
+	signer   *auth.Signer
+	engine   *countingEngine
+	res      *tenant.Resolved
+	redis    *miniredis.Miniredis
+	features *features.Store
+	events   *fakeSink
 }
 
 func newHarness(t *testing.T) *harness {
@@ -83,8 +86,9 @@ func newHarness(t *testing.T) *harness {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	b := stagestest.Breakers()
+	fs := features.New(rdb)
 	e, err := pipeline.NewEngine(noop.NewMeterProvider().Meter("t"),
-		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b), rank.New(b), rerank.New())
+		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b, fs), rank.New(b), rerank.New())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +98,11 @@ func newHarness(t *testing.T) *harness {
 	seed := make([]byte, 32)
 	signer, _ := auth.NewSigner(base64.StdEncoding.EncodeToString(seed), "iss")
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := &harness{signer: signer, engine: &countingEngine{Engine: e}, res: res, redis: mr}
+	h := &harness{signer: signer, engine: &countingEngine{Engine: e}, res: res, redis: mr, features: fs, events: &fakeSink{}}
 	svc := &Service{
 		Resolver: fixedResolver{res}, Providers: fixedProviders{p}, Engine: h.engine,
-		Snapshots: NewSnapshots(rdb), Cursors: NewCursors([]byte("k")), Limiter: redis_rate.NewLimiter(rdb), Log: log,
+		Snapshots: NewSnapshots(rdb), Cursors: NewCursors([]byte("k")), Limiter: redis_rate.NewLimiter(rdb),
+		Events: h.events, Vendors: fs, Log: log,
 	}
 	h.svc = svc
 	mux := http.NewServeMux()

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/imaging"
@@ -230,5 +232,7 @@ func (s *Service) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	resp.RequestID = ulid.Make().String()
+	s.emitImpressions(p.Tenant, resp, pipeline.UserContext{})
 	platform.WriteJSON(w, http.StatusOK, resp)
 }

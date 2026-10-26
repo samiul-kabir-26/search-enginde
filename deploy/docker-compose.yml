@@ -91,11 +91,14 @@ services:
     command:
       - |
         set -e
-        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_EVENTS}; do
+        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_VENDOR:-catalog.vendor.v1} ${KAFKA_TOPIC_EVENTS}; do
           rpk topic create "$$t" -p 6 -r 1 -X brokers=redpanda:9092 || rpk topic describe "$$t" -X brokers=redpanda:9092 >/dev/null
         done
-        # The catalog topic keeps the latest event per product, so backfills read each product once.
-        rpk topic alter-config ${KAFKA_TOPIC_CATALOG} --set cleanup.policy=compact -X brokers=redpanda:9092
+        # The catalog and vendor topics keep the latest event per product or vendor, so backfills
+        # and new consumers read each one once.
+        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_VENDOR:-catalog.vendor.v1}; do
+          rpk topic alter-config "$$t" --set cleanup.policy=compact -X brokers=redpanda:9092
+        done
     restart: "no"
 
   clickhouse:

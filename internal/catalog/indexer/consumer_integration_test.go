@@ -107,3 +107,37 @@ func TestCatchUpAcrossPasses(t *testing.T) {
 		t.Fatal("catch-up with nothing new must return immediately")
 	}
 }
+
+// TestConsumerClosesAfterCancel is a regression test: the indexer hung at shutdown because Run
+// returned after a poll without AllowRebalance, and leaving the group waited for it.
+func TestConsumerClosesAfterCancel(t *testing.T) {
+	broker := testinfra.Redpanda(t)
+	c, err := NewConsumer([]string{broker}, "close-test", &Builder{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcl, err := kgo.NewClient(kgo.SeedBrokers(broker), kgo.AllowAutoTopicCreation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pcl.Close()
+	// An undecodable vendor record: the poll returns it, apply counts it invalid, the loop goes on.
+	if err := pcl.ProduceSync(context.Background(), &kgo.Record{Topic: catalog.TopicVendor, Value: []byte("{")}).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- c.Run(ctx) }()
+	time.Sleep(5 * time.Second) // joined the group and polled
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{})
+	go func() { c.Close(); close(closed) }()
+	select {
+	case <-closed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("Close hung after Run returned")
+	}
+}

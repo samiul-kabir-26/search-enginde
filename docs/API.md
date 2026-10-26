@@ -86,7 +86,25 @@ Batch of up to 500 events:
 { "events": [ { "event_id": "uuid", "type": "click", "ts": "2026-10-24T10:00:00Z", "request_id": "01J...", "product_id": "p_1", "position": 3, "user_id": "u_123", "session_id": "s_abc", "sponsored": false } ] }
 ```
 
-Event types are `impression`, `click`, `add_to_cart`, `order`, `rfq`. `order` requires `order_id`, `quantity` and `value_minor`. Events are deduplicated by `event_id`.
+Event types are `impression`, `click`, `add_to_cart`, `order`, `rfq`. `order` requires `order_id`, `quantity` and `value_minor`.
+
+- **Validation.** The whole batch is checked and every error is reported (400 with `errors[].path`, e.g. `/events/3/order_id`); nothing is written unless every event is valid. `event_id` is a UUID; `ts` may be at most 5 minutes in the future; `position` is within 1–10,000 and required for impressions; IDs are at most 256 bytes; `randomized` (impressions only, see below) is optional. Unknown fields, including `tenant_id`, are rejected: the tenant always comes from the token.
+- **Delivery.** 202 `{accepted}` means the events are acknowledged by Kafka (`search.events.v1`, key `{tenant_id}:{event_id}`). Kafka unavailable → 503; retry the same batch. The plan's events rate counts events, not requests, with a burst of one full batch (429 with `Retry-After`).
+- **Deduplication.** Repeated `event_id`s are dropped within a batch, and ClickHouse collapses repeats across batches (`ReplacingMergeTree`, read with `FINAL`), so retrying a batch is safe.
+- **Impressions.** search-api emits an `impression` for every result it returns (search, image search, similar items, every page), with the response's `request_id`, the result position and the request's user. Clients send `click`, `add_to_cart`, `order` and `rfq` events that reference that `request_id`, and impressions only for results not served by this API. Emitted impressions never slow a search: they are queued without waiting and dropped (counted in `events_dropped_total`) when Kafka is unavailable.
+- **`randomized`.** Marks an impression shown in a randomized order (an exploration slot). featurejob estimates the examination probability per position from these requests to position-debias CTR (`docs/MODELS.md` §4).
+
+ClickHouse ingests the topic through a Kafka engine table and a materialized view within seconds; featurejob turns the events into online features at least every 15 minutes.
+
+### PUT /v1/vendors  (scope `catalog:write`)
+
+Bulk update of vendor features (PLAN.md R9), up to 500 vendors:
+
+```json
+{ "vendors": [ { "vendor_id": "v_9", "score": 0.82, "on_time_dispatch_rate": 0.97, "dispute_rate": 0.01, "response_hours": 6, "verified": true } ] }
+```
+
+Updates are partial: only the fields sent are stored and the others keep their stored value (or the declared default). `score` and the rates are within [0, 1]; `response_hours` is raw hours (ranked as `min(hours/48, 1)`). The tenant computes these; they are stored in Redis only and take effect on the next search, with no reindex. Vendor data can also arrive in product payloads (`catalog.vendor_mapping`, `docs/TENANT_CONFIG.md` §3) or on the `catalog.vendor.v1` topic. 200 `{updated}`; Redis unavailable → 503; the plan's events rate also limits vendor updates (counted per vendor).
 
 ### GET /healthz, GET /readyz, GET /metrics
 
@@ -104,7 +122,7 @@ Event types are `impression`, `click`, `add_to_cart`, `order`, `rfq`. `order` re
 | POST | `/v1/auth/resend-verification` | Emails a new link to the caller (202) |
 | POST | `/v1/auth/token` | API key → JWT |
 | GET | `/.well-known/jwks.json` | Active and retired, unrevoked keys |
-| GET/POST/DELETE | `/v1/tenants/{tid}/api-keys` | Body `{scopes}` (default `search:read events:write`; allowed: `search:read`, `search:debug`, `events:write`). Returns `{api_key, key}`; the secret is shown once |
+| GET/POST/DELETE | `/v1/tenants/{tid}/api-keys` | Body `{scopes}` (default `search:read events:write`; allowed: `search:read`, `search:debug`, `events:write`, `catalog:write`). Returns `{api_key, key}`; the secret is shown once |
 | GET/POST/PATCH/DELETE | `/v1/tenants/{tid}/users` | Roles: `owner`, `admin`, `developer`, `viewer`. Only an owner can create or promote an owner, and the last owner cannot be removed or demoted |
 
 Activation (config activate and the onboarding go-live step) requires a verified email (`email_unverified`, 403). Platform admins are exempt.

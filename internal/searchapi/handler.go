@@ -57,9 +57,9 @@ type Runner interface {
 	Run(ctx context.Context, res *tenant.Resolved, p *pipeline.Providers, q *pipeline.Query) (*pipeline.State, *pipeline.Trace)
 }
 
-// RateLimiter admits requests per tenant (GCRA).
+// RateLimiter admits requests (or n events) per tenant (GCRA).
 type RateLimiter interface {
-	Allow(ctx context.Context, key string, limit redis_rate.Limit) (*redis_rate.Result, error)
+	AllowN(ctx context.Context, key string, limit redis_rate.Limit, n int) (*redis_rate.Result, error)
 }
 
 // Service serves the data-plane search endpoints.
@@ -72,7 +72,11 @@ type Service struct {
 	Limiter   RateLimiter
 	// Shadow runs sampled requests on the tenant's shadow version (nil disables).
 	Shadow *Shadow
-	Log    *slog.Logger
+	// Events ingests POST /v1/events and receives impressions of served results (nil disables).
+	Events EventSink
+	// Vendors stores PUT /v1/vendors updates (nil disables).
+	Vendors VendorStore
+	Log     *slog.Logger
 }
 
 // Routes registers the search routes behind bearer auth.
@@ -81,6 +85,8 @@ func (s *Service) Routes(mux *http.ServeMux, v *auth.Verifier) {
 	mux.Handle("POST /v1/search", read(http.HandlerFunc(s.handleSearch)))
 	mux.Handle("POST /v1/search/image", read(http.HandlerFunc(s.handleImageSearch)))
 	mux.Handle("GET /v1/products/{product_id}/similar", read(http.HandlerFunc(s.handleSimilar)))
+	mux.Handle("POST /v1/events", auth.Middleware(v, auth.ScopeEventsWrite)(http.HandlerFunc(s.handleEvents)))
+	mux.Handle("PUT /v1/vendors", auth.Middleware(v, auth.ScopeCatalogWrite)(http.HandlerFunc(s.handleVendors)))
 }
 
 // SearchRequest is the body of POST /v1/search.
@@ -139,13 +145,16 @@ func badRequest(w http.ResponseWriter, errs ...platform.FieldError) {
 	platform.WriteProblem(w, platform.Problem{Status: http.StatusBadRequest, Detail: "the request is invalid", Errors: errs})
 }
 
-func decodeStrict(r *http.Request, dst any) error {
-	body, err := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
+func decodeStrict(r *http.Request, dst any) error { return decodeStrictN(r, dst, MaxBodyBytes) }
+
+// decodeStrictN decodes a JSON body of at most limit bytes, rejecting unknown fields.
+func decodeStrictN(r *http.Request, dst any, limit int) error {
+	body, err := io.ReadAll(io.LimitReader(r.Body, int64(limit)+1))
 	if err != nil {
 		return fmt.Errorf("read body: %w", err)
 	}
-	if len(body) > MaxBodyBytes {
-		return fmt.Errorf("body exceeds %d bytes", MaxBodyBytes)
+	if len(body) > limit {
+		return fmt.Errorf("body exceeds %d bytes", limit)
 	}
 	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
@@ -246,16 +255,24 @@ func (s *Service) resolve(ctx context.Context, w http.ResponseWriter, r *http.Re
 	} else {
 		res, err = s.Resolver.Get(ctx, p.Tenant)
 	}
+	if !s.resolved(w, p, err) {
+		return nil, false
+	}
+	return res, s.admit(ctx, w, res, "search", res.Plan.SearchRPS, res.Plan.SearchBurst, 1)
+}
+
+// resolved writes the problem for a failed tenant resolution.
+func (s *Service) resolved(w http.ResponseWriter, p auth.Principal, err error) bool {
 	if errors.Is(err, tenant.ErrNotFound) {
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusForbidden, Detail: "the tenant is unknown or inactive"})
-		return nil, false
+		return false
 	}
 	if err != nil {
 		s.Log.Error("resolve tenant", "tenant", p.Tenant, "err", err)
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "tenant configuration is unavailable"})
-		return nil, false
+		return false
 	}
-	return res, s.admit(ctx, w, res)
+	return true
 }
 
 func compileFilter(w http.ResponseWriter, f *filter.Expr, res *tenant.Resolved) (filter.Expr, bool) {
@@ -340,6 +357,9 @@ func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.
 	if explain {
 		resp.Trace = tr
 	}
+	if !playground {
+		s.emitImpressions(p.Tenant, resp, q.User)
+	}
 	return resp, true
 }
 
@@ -353,14 +373,14 @@ func (s *Service) providers(ctx context.Context, w http.ResponseWriter, res *ten
 	return providers, true
 }
 
-// admit applies the plan's GCRA limit. A limiter outage fails open: availability beats strict
-// limits for read traffic.
-func (s *Service) admit(ctx context.Context, w http.ResponseWriter, res *tenant.Resolved) bool {
-	if s.Limiter == nil || res.Plan.SearchRPS <= 0 {
+// admit applies the plan's GCRA limit for kind: n searches, events or vendor updates. A limiter
+// outage fails open: availability beats strict limits.
+func (s *Service) admit(ctx context.Context, w http.ResponseWriter, res *tenant.Resolved, kind string, rps, burst, n int) bool {
+	if s.Limiter == nil || rps <= 0 {
 		return true
 	}
-	lim := redis_rate.Limit{Rate: res.Plan.SearchRPS, Burst: max(res.Plan.SearchBurst, 1), Period: time.Second}
-	r, err := s.Limiter.Allow(ctx, "rl:search:{"+string(res.Tenant.ID)+"}", lim)
+	lim := redis_rate.Limit{Rate: rps, Burst: max(burst, n, 1), Period: time.Second}
+	r, err := s.Limiter.AllowN(ctx, "rl:"+kind+":{"+string(res.Tenant.ID)+"}", lim, n)
 	if err != nil {
 		s.Log.Warn("rate limiter unavailable; admitting", "tenant", res.Tenant.ID, "err", err)
 		return true
@@ -369,7 +389,7 @@ func (s *Service) admit(ctx context.Context, w http.ResponseWriter, res *tenant.
 		return true
 	}
 	w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(r.RetryAfter.Seconds()))))
-	platform.WriteProblem(w, platform.Problem{Status: http.StatusTooManyRequests, Detail: fmt.Sprintf("the %s plan allows %d searches per second", res.Plan.ID, res.Plan.SearchRPS)})
+	platform.WriteProblem(w, platform.Problem{Status: http.StatusTooManyRequests, Detail: fmt.Sprintf("the %s plan allows %d %s per second", res.Plan.ID, rps, kind)})
 	return false
 }
 

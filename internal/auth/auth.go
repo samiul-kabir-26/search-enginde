@@ -25,6 +25,7 @@ const (
 	ScopeSearchDebug      = "search:debug"
 	ScopeSearchPlayground = "search:playground"
 	ScopeEventsWrite      = "events:write"
+	ScopeCatalogWrite     = "catalog:write"
 	ScopeTenantRead       = "tenant:read"
 	ScopeTenantWrite      = "tenant:write"
 	ScopeTenantAdmin      = "tenant:admin"
@@ -33,7 +34,7 @@ const (
 
 // DataPlaneScopes may be granted to API keys.
 func DataPlaneScopes() []string {
-	return []string{ScopeSearchRead, ScopeSearchDebug, ScopeEventsWrite}
+	return []string{ScopeSearchRead, ScopeSearchDebug, ScopeEventsWrite, ScopeCatalogWrite}
 }
 
 // RoleScopes maps a tenant user role to console scopes.

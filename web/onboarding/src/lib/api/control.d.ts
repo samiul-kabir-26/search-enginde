@@ -1036,7 +1036,7 @@ export interface components {
             }[];
         };
         /** @enum {string} */
-        Scope: "search:read" | "search:debug" | "events:write";
+        Scope: "search:read" | "search:debug" | "events:write" | "catalog:write";
         ApiKeyCreate: {
             /**
              * @default [
@@ -1452,6 +1452,15 @@ export interface components {
                 [key: string]: string;
             };
             custom_fields?: components["schemas"]["CustomField"][];
+            /** @description Optional. Vendor feature to a JSONPath in the product payload, or {path, min, max} to rescale a score or rate from the tenant's range to [0, 1]. Values are stored per vendor_id as online ranking features (PLAN.md R9). */
+            vendor_mapping?: {
+                [key: string]: string | {
+                    /** @description JSONPath */
+                    path: string;
+                    min?: number;
+                    max?: number;
+                };
+            };
             samples?: {
                 [key: string]: unknown;
             }[];

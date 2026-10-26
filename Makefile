@@ -172,6 +172,14 @@ run-indexer: .env ## Run the streaming indexer (consumer group) against the Comp
 centroids: .env ## Rebuild category centroids for a tenant's active index (TENANT=demo)
 	@$(ENV_LOAD) go run ./cmd/featurejob centroids -tenant $(or $(TENANT),demo)
 
+.PHONY: run-featurejob
+run-featurejob: .env ## Run featurejob on its schedule for every live tenant (online features, centroids)
+	@$(ENV_LOAD) go run ./cmd/featurejob
+
+.PHONY: features
+features: .env ## Refresh online features once from ClickHouse events (TENANT=demo)
+	@$(ENV_LOAD) go run ./cmd/featurejob -once -tenant $(or $(TENANT),demo)
+
 .PHONY: token
 token: .env ## Print a JWT for the demo API key (needs `make run-control-api`)
 	@curl -fsS -X POST http://localhost:8081/v1/auth/token -H 'Content-Type: application/json' \
@@ -187,6 +195,7 @@ backfill: .env ## Rebuild a tenant index from the catalog topic and swap aliases
 data: ## Download ABO metadata and the selected images, then build data/ (deterministic, seed 42)
 	cd tools && $(UV_RUN) python -m dataprep.select --seed 42
 	cd tools && $(UV_RUN) python -m dataprep.synthesize --seed 42
+	cd tools && $(UV_RUN) python -m dataprep.simulate --seed 42
 
 .PHONY: models
 models: ## Export CLIP and BGE to ONNX into the Triton model repository (parity-checked)
@@ -197,8 +206,12 @@ models-smoke: ## Smoke-test the Triton embedders (needs `make up-models`)
 	cd tools && $(UV_RUN) python -m models.smoke
 
 .PHONY: seed
-seed: .env ## Publish the dataset as catalog events and create the demo tenant (M1)
+seed: .env ## Create the demo tenant and publish the catalog and vendor events (M1, M6)
 	@$(ENV_LOAD) go run ./cmd/seed
+
+.PHONY: seed-events
+seed-events: .env ## Publish the simulated interaction history (data/events) to the events topic (M6)
+	@$(ENV_LOAD) go run ./cmd/seed -events
 
 .PHONY: eval
 eval: ## Run offline eval suites against the running stack (M10)

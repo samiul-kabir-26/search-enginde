@@ -6,6 +6,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
 // Named vectors in every tenant collection (docs/DATA.md §6).
@@ -148,6 +149,36 @@ type Scorer interface {
 // CentroidIndex predicts categories from a text vector.
 type CentroidIndex interface {
 	Nearest(vec []float32, k int, minConfidence float64) []CategoryGuess
+}
+
+// FeatureRequest names what one request needs from the online feature store.
+type FeatureRequest struct {
+	ProductIDs []string
+	VendorIDs  []string
+	UserID     string
+}
+
+// OnlineFeatures are the stored item, vendor and user features for one request, keyed by
+// catalog feature name (docs/MODELS.md §4) and already normalized. Absent IDs have no entry,
+// so scorers use the declared defaults.
+type OnlineFeatures struct {
+	Items   map[string]map[string]float64
+	Vendors map[string]map[string]float64
+	// User is nil when the request names no user or the user has no stored features.
+	User *UserFeatures
+}
+
+// UserFeatures are a user's stored preferences.
+type UserFeatures struct {
+	// CategoryAffinity is the user's share of recent interactions per category ID.
+	CategoryAffinity map[string]float64
+	// PriceLo and PriceHi bound the user's usual price range in minor units (0, 0 = unknown).
+	PriceLo, PriceHi int64
+}
+
+// FeatureReader reads online features (PLAN.md R9) in one round trip.
+type FeatureReader interface {
+	Read(ctx context.Context, tenant tenant.ID, req FeatureRequest) (*OnlineFeatures, error)
 }
 
 // Providers are the tenant's providers for one config version, built by the registry.

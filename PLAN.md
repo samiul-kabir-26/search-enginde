@@ -9,7 +9,23 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M5 is done** (M0–M4 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M6 is done** (M0–M5 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M6 verification (2026-10-26, same laptop, dev stack with Triton):
+
+| Check | Result |
+|---|---|
+| Acceptance: features readable in a request | `searchapi` TestOnlineFeaturesReadableInSearch: item, vendor and user features stored in Redis appear in the S4 explain trace and move a product from 3rd to 1st; Redis down → 200 with the declared defaults and `online_features:<reason>` in the trace. Live: after `make seed-events` + one featurejob run, all 50 traced candidates of `office chair` for `u_01317` carry `ctr_*`, `cvr_*`, `orders_30d_log`, `vendor_*` and both user features, and the top 5 changed |
+| Freshness | Live: 40 clicks and 10 orders via `POST /v1/events` (202) were in ClickHouse after **2.3 s** and in Redis after **40.7 s** with the scheduler at 1 min (`orders_30d_log` 0 → 0.2398 = ln 11/10). At the default 10 min interval the worst case is ≈ 10 min plus a 2 s run, inside 15 min. Integration test (real Redpanda + ClickHouse): 9,137 events → Redis features in **8.8 s** |
+| Kafka → ClickHouse | Migration 000003 (Kafka engine table + materialized view): 2,416,684 simulated events published by `seed -events` in 14.8 s and fully ingested 16 s later; `FINAL` collapses a resent event; 1,005 impressions emitted by search-api for warm-up searches arrived alongside (none `randomized`) |
+| featurejob | One run for the demo tenant: **10,000 items and 4,999 users in 2.1 s**; propensity **η = 0.698** from 22,469 randomized clicks (the simulator's hidden value is 0.7; the integration test estimates 0.672 from 1,121 clicks); scheduled mode covers all 5 live tenants plus the hourly centroid refresh |
+| S4 cost | 25 live queries, ~710 candidates each: S4 (feature read + scoring) **p50 4.9 ms, p95 6.6 ms** of its 15 ms budget, 0 fallbacks; before any features existed S4 took 2.9 ms |
+| Vendors | `seed` published 200 vendors to `catalog.vendor.v1`; the indexer stored them in Redis 0.26 s later (no TTL, score per the DATA §4 formula, e.g. v_001 = 0.7613). `PUT /v1/vendors` partial updates keep unsent fields (test); payload `vendor_mapping` writes only for non-stale products and never fails indexing (test) |
+| Simulator | `make data` step `simulate`: 2,000,000 impressions, 233,247 clicks, 112,904 carts, 70,533 orders, 10% randomized sessions, 2 m 22 s; two runs give byte-identical files (sha256 of every part, `users.jsonl` and params; pytest too) |
+| User features vs hidden truth | Learned from events only: a user's hidden top category is among their learned top 20 for 9% of users (a random category: 1%), and 37% of learned price bands fall in the hidden band (5 bands). The simulator draws text queries independently of the user, so the personalization signal is real but weak (see M8) |
+| Tests | Unit (`-race`) and integration (`-p 1 -race`, 30 packages) pass, including the new Kafka → ClickHouse → featurejob → Redis test. `make cover` **87.0%** (pipeline, stages, tenant, security). `make lint` clean; both OpenAPI files pass Redocly; TS client regenerated and the web app typechecks; pytest and ruff clean |
+| Fix found live | The indexer hung at shutdown (pre-existing since M1): `Run` returned on cancellation after a poll without `AllowRebalance`, and with `BlockRebalanceOnPoll` leaving the group waits for it. `Consumer.Close` now releases it first; the integration test `TestConsumerClosesAfterCancel` hangs without the fix and passes with it |
+| Environment note | The laptop had rebooted: the first searches timed out in S2 until Qdrant's vectors paged back in (M3 note), and one query during the bulk ClickHouse ingest still timed out on the vector retrievers. Linting with `--build-tags integration` reports the same 3 `contextcheck` findings in M4's control-plane harness as before |
 
 M5 verification (2026-10-25, same laptop):
 
@@ -138,6 +154,16 @@ M0 verification:
 | D50 | Rules 3–5 probe live on draft save, validate and publish (5 s per probe); successful probes are cached 30 s, failures never | Wizard edits would otherwise call tenant endpoints on every save |
 | D51 | Milvus searches use Bounded consistency; gets and counts use Strong | Search latency; writes become searchable within Milvus's graceful time (~5 s) |
 | D52 | Vault is used through its HTTP KV v2 API (no SDK); secret refs are ULIDs and the Vault path includes the tenant | Two calls are needed; refs are validated before use in a path |
+| D53 | Events carry an optional `randomized` flag (impressions only), stored in a new ClickHouse column | featurejob must know which impressions were shown in a randomized order to estimate position propensities (docs/DATA.md §5, MODELS §4); the event schema had no marker. search-api does not run exploration slots yet, so only tenants (and the simulator) send it |
+| D54 | Propensity `p(pos) = pos^-η`, η fitted from randomized traffic (≥ 200 clicks, ≥ 5 positions, clamped to [0, 2]), kept in `f:{tid}:propensity`; previous estimate, then η = 0, as fallbacks. CTR = clicks per examination with a 20-examination prior toward the tenant mean; CVR = orders per click with a 10-click prior | The power law fits the examination curve with one parameter and stays smooth at deep positions; shrinkage keeps items with a few impressions from being ranked by noise. A click implies examination, so CVR needs no position correction. On the synthetic data η = 0.70 (hidden 0.7) |
+| D55 | search-api emits one impression per returned result (every page, image search, similar items) with `TryProduce`: a 50,000-record buffer and 30 s delivery timeout, drops counted in `events_dropped_total`; Kafka is not in `/readyz` | Impressions must never slow or fail a search, and a Kafka outage must not take search out of rotation. Tenants send clicks, carts and orders referencing `request_id` |
+| D56 | `event_id` dedup happens within a batch at ingest and across batches in ClickHouse (`ReplacingMergeTree`, queries use `FINAL`); no Redis seen-set | Retries of a batch are safe without a per-event Redis write; every featurejob query already reads `FINAL` |
+| D57 | User features come from events only: interactions weighted order 3, cart 2, click 1 over 30 days; `category_affinity` = share of weight per category ID (top 20); price band = weighted 20th–80th percentile of interacted prices in minor units (≥ 3 products), stored as `price_lo`/`price_hi`; categories and prices are read from the tenant's lexical index | The simulator's `users.jsonl` is hidden ground truth and must not leak into features (the earlier draft read it). Minor-unit bands work for any currency, unlike named bands |
+| D58 | Vendor updates are partial on every path (only sent fields are written); `response_hours` is stored raw and ranked as min(h/48, 1); `{min, max}` rescaling only for score and rates. `PUT /v1/vendors` writes Redis directly (plan events rate); `catalog.vendor.v1` and `catalog.vendor_mapping` are written by the indexer, payload vendors only for non-stale products, and a Redis failure there is logged without stalling catalog indexing | Defaults written for unsent fields (earlier draft) would overwrite real values. The update shape lives in `internal/catalog` (`catalog.Vendor`) to avoid an import cycle with `providers/features` |
+| D59 | featurejob runs every 10 min (`FEATUREJOB_INTERVAL`) for every tenant with an active config, centroids hourly for tenants with a platform vector index; logic in `internal/featurejob` | 10 min plus a run of seconds keeps features ≤ 15 min old; a package makes the job testable against real ClickHouse |
+| D60 | S4 holds the `FeatureReader` (platform-wide) instead of `Providers`; the read goes through `resilience.Call` (breaker `online_features`) with half of S4's remaining budget; failure → declared defaults and trace reason `online_features:<reason>` | S4's budget is 15 ms (10 ms for image queries); scoring must keep time, and Redis trouble must never fail a search |
+| D61 | `seed` publishes demo vendors to `catalog.vendor.v1` with a documented score formula (DATA §4); `seed -events` shifts event timestamps so the simulator's `ref_date` lands on the current time | Exercises the real vendor path instead of writing Redis directly; the 7/30-day windows stay populated whenever the stack is seeded |
+| D62 | The ClickHouse Kafka table names the Compose broker (`redpanda:9092`), types `type` as an Enum in the Kafka table and skips up to 1000 broken messages per block; ISO timestamps parse with `best_effort` | A bad message is skipped instead of blocking the stream (a failing CAST in the view would block it). Integration tests substitute their broker; production needs its own broker setting (carried forward) |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
 ### Resolved questions (answered 2026-10-25)
@@ -384,17 +410,22 @@ New deps: `jackc/pgx/v5`, `milvus-io/milvus-proto/go-api/v2`, testcontainers pos
 
 ---
 
-## M6 — Events, ClickHouse, features
+## M6 — Events, ClickHouse, features ✅
 
-**Done when:** online item and user features are readable in a request, with freshness ≤ 15 min.
+**Done when:** online item and user features are readable in a request, with freshness ≤ 15 min. **Met: stored features are read by S4, shown in the explain trace and change the ranking; event → Redis feature in under 10 s plus the 10 min schedule (see §0).**
 
-- [ ] `POST /v1/events`: validation (order fields), ≤ 500 per batch, dedup by `event_id`, franz-go producer to `search.events.v1`
-- [ ] search-api emits async `impression` events
-- [ ] ClickHouse migration: Kafka engine table plus materialized view into `events`
-- [ ] `tools/dataprep/simulate.py`: users (affinity, price band, region), sessions, hidden utility, 10% randomized positions, about 2M impressions → `data/events/`; `cmd/seed --events`
-- [ ] `cmd/featurejob`: position-debiased CTR/CVR (7d/30d), orders, user affinity and price band → Redis keys and TTLs per **R9**; schedule ≤ 15 min; hourly centroid refresh (**R6**)
-- [ ] Vendor data from the tenant: `catalog.vendor_mapping` in product payloads, `PUT /v1/vendors` (bulk) and topic `catalog.vendor.v1` → `f:{tid}:v:{vendor_id}`, with optional range normalization (**R9**)
-- [ ] `providers/features`: Redis FeatureReader used by S4–S6
+- [x] `POST /v1/events`: strict validation reporting every error (order fields, UUIDs, impression positions, future `ts`, `randomized` on impressions only, tenant only from the token), ≤ 500 per batch, dedup by `event_id` within the batch and in ClickHouse across batches (**D56**), franz-go producer to `search.events.v1` (202 after the Kafka ack, 503 to retry), plan events rate counted per event (burst: one batch); `search.yaml` first
+- [x] search-api emits async `impression` events for every served page, image search and similar items (`TryProduce`, bounded buffer, drops counted in `events_dropped_total`; Kafka is not a readiness dependency) (**D55**)
+- [x] ClickHouse migration 000003: Kafka engine table plus materialized view into `events`, `randomized` column, broken messages skipped (**D53**, **D62**)
+- [x] `tools/dataprep/simulate.py`: 5,000 users (affinity, price band, region), 40,000 sessions, hidden utility, 10% randomized positions marked `randomized`, 2M impressions → `data/events/`, byte-identical per seed (RNG event IDs, gzip `mtime=0`); `cmd/seed -events` / `make seed-events` with timestamps shifted to the present (**D61**)
+- [x] `cmd/featurejob` + `internal/featurejob`: propensity η fitted from randomized traffic, position-debiased CTR and CVR (7d/30d) with Bayesian shrinkage, orders, user category affinity and price band → Redis keys and TTLs per **R9**; every live tenant every 10 min (`-once`, `make features`); hourly centroid refresh (**R6**) (**D54**, **D57**, **D59**)
+- [x] Vendor data from the tenant: `catalog.vendor_mapping` in product payloads (onboarding catalog step too), `PUT /v1/vendors` (bulk, `catalog:write`) and topic `catalog.vendor.v1` → `f:{tid}:v:{vendor_id}`, partial updates, optional `{min, max}` normalization (**R9**, **D58**)
+- [x] `providers/features`: Redis feature store, one pipelined read per request; S4 reads it under half its remaining budget with a breaker and falls back to the declared defaults (**D60**)
+- [x] Tests: unit (validation, records, store, S4 merge and fallback, featurejob math, vendor mapping and topic, indexer), search-api acceptance test (features in the trace change the ranking; Redis outage → defaults), integration test Kafka → ClickHouse → featurejob → Redis on real Redpanda and ClickHouse, pytest determinism; docs (API §1, DATA §4–6/§8, MODELS §4, TENANT_CONFIG §3/§5, ARCHITECTURE §1–3/§6, ONBOARDING)
+
+Carried forward: the synthetic user signal is weak (text queries ignore the user's affinities; M8 should bias them before evaluating personalization); the per-tenant ClickHouse retention and a production ClickHouse Kafka broker setting (the migration names the Compose broker, **D62**); exploration slots served by search-api itself (impressions it emits are never `randomized`, so tenants without their own randomized traffic get η = 0 until then); the startup warm-up for search-api (from M4).
+
+New deps: none (`clickhouse-go/v2` moved into featurejob). Test image: `clickhouse/clickhouse-server:26.8.34.13-alpine` (same as Compose).
 
 ---
 

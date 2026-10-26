@@ -42,12 +42,12 @@ type cachedTarget struct {
 	builtAt time.Time
 }
 
-// NewConsumer joins consumer group `group` on the catalog topic.
+// NewConsumer joins consumer group `group` on the catalog and vendor topics.
 func NewConsumer(brokers []string, group string, builder *Builder, proc *Processor, log *slog.Logger) (*Consumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
-		kgo.ConsumeTopics(catalog.Topic),
+		kgo.ConsumeTopics(catalog.Topic, catalog.TopicVendor),
 		kgo.ConsumeResetOffset(kgo.NewOffset().AtStart()),
 		kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(),
@@ -58,8 +58,12 @@ func NewConsumer(brokers []string, group string, builder *Builder, proc *Process
 	return &Consumer{client: cl, builder: builder, proc: proc, log: log, targets: map[tenant.ID]cachedTarget{}}, nil
 }
 
-// Close leaves the group.
-func (c *Consumer) Close() { c.client.Close() }
+// Close leaves the group. Run can return on cancellation between a poll and AllowRebalance, and
+// with BlockRebalanceOnPoll leaving the group waits for that release, so Close releases it first.
+func (c *Consumer) Close() {
+	c.client.AllowRebalance()
+	c.client.Close()
+}
 
 // Run consumes until ctx is cancelled. A failing batch is retried with backoff and never
 // skipped, so delivery is at-least-once; every write is idempotent.
@@ -91,7 +95,7 @@ func (c *Consumer) applyWithRetry(ctx context.Context, records []*kgo.Record) er
 		res, err := c.apply(ctx, records)
 		if err == nil {
 			c.log.Info("applied catalog events", "records", len(records), "upserted", len(res.UpsertedIDs),
-				"deleted", len(res.DeletedIDs), "stale", res.Stale, "invalid", res.Invalid, "missing_image", res.MissingImage)
+				"deleted", len(res.DeletedIDs), "vendors", res.Vendors, "stale", res.Stale, "invalid", res.Invalid, "missing_image", res.MissingImage)
 			return nil
 		}
 		c.log.Error("apply failed; retrying", "err", err, "delay", delay)
@@ -106,7 +110,25 @@ func (c *Consumer) applyWithRetry(ctx context.Context, records []*kgo.Record) er
 
 func (c *Consumer) apply(ctx context.Context, records []*kgo.Record) (Result, error) {
 	var res Result
-	byTenant, invalid := groupByTenant(records, c.log)
+	var products, vendors []*kgo.Record
+	for _, r := range records {
+		if r.Topic == catalog.TopicVendor {
+			vendors = append(vendors, r)
+		} else {
+			products = append(products, r)
+		}
+	}
+	if len(vendors) > 0 {
+		n, invalid, err := c.applyVendors(ctx, vendors)
+		res.Vendors, res.Invalid = n, invalid
+		if err != nil {
+			return res, err
+		}
+	}
+	if len(products) == 0 {
+		return res, nil
+	}
+	byTenant, invalid := groupByTenant(products, c.log)
 	res.Invalid += invalid
 	for id, events := range byTenant {
 		t, err := c.target(ctx, id)
@@ -423,15 +445,44 @@ func reached(ps map[int32]*partitionProgress) bool {
 	return true
 }
 
+// applyVendors writes catalog.vendor.v1 updates to the online feature store (PLAN.md R9).
+// Undecodable records are counted and skipped; a store failure retries the batch.
+func (c *Consumer) applyVendors(ctx context.Context, records []*kgo.Record) (applied, invalid int, err error) {
+	if c.builder.Vendors == nil {
+		return 0, len(records), nil
+	}
+	byTenant := map[tenant.ID][]catalog.Vendor{}
+	for _, r := range records {
+		e, err := catalog.DecodeVendorEvent(r.Value, headerMap(r))
+		if err != nil {
+			invalid++
+			c.log.Warn("undecodable vendor event skipped", "partition", r.Partition, "offset", r.Offset, "err", err)
+			continue
+		}
+		byTenant[tenant.ID(e.TenantID)] = append(byTenant[tenant.ID(e.TenantID)], e.Vendor)
+	}
+	for id, vs := range byTenant {
+		if err := c.builder.Vendors.PutVendors(ctx, id, vs); err != nil {
+			return applied, invalid, fmt.Errorf("tenant %s vendors: %w", id, err)
+		}
+		applied += len(vs)
+	}
+	return applied, invalid, nil
+}
+
+func headerMap(r *kgo.Record) map[string]string {
+	headers := make(map[string]string, len(r.Headers))
+	for _, h := range r.Headers {
+		headers[h.Key] = string(h.Value)
+	}
+	return headers
+}
+
 func groupByTenant(records []*kgo.Record, log *slog.Logger) (map[tenant.ID][]catalog.ProductEvent, int) {
 	out := map[tenant.ID][]catalog.ProductEvent{}
 	invalid := 0
 	for _, r := range records {
-		headers := make(map[string]string, len(r.Headers))
-		for _, h := range r.Headers {
-			headers[h.Key] = string(h.Value)
-		}
-		e, err := catalog.DecodeProductEvent(r.Key, r.Value, headers)
+		e, err := catalog.DecodeProductEvent(r.Key, r.Value, headerMap(r))
 		if err != nil {
 			invalid++
 			log.Warn("undecodable catalog event skipped", "partition", r.Partition, "offset", r.Offset, "err", err)

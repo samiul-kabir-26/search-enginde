@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import json
 import random
 import subprocess
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -157,3 +159,76 @@ def test_parse_and_slug() -> None:
     assert slug("Bags & Wallets") == "bags-wallets"
     assert slug("  Café Crème ") == "cafe-creme"
     assert slug("Électronique/TV 4K") == "electronique-tv-4k"
+
+
+def run_simulate(data: Path) -> None:
+    cmd = [
+        sys.executable,
+        "-m",
+        "dataprep.simulate",
+        "--seed",
+        "42",
+        "--data",
+        str(data),
+        "--users",
+        "50",
+        "--sessions",
+        "100",
+        "--parts",
+        "2",
+    ]
+    subprocess.run(cmd, check=True, cwd=TOOLS)
+
+
+def test_simulate_invariants(raw_dir: Path, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    build(raw_dir, out)
+    run_simulate(out)
+
+    users = [json.loads(line) for line in open(out / "users.jsonl")]
+    assert len(users) == 50
+    assert all("user_id" in u and "price_band" in u and "category_affinities" in u for u in users)
+
+    all_events = []
+    for part in sorted((out / "events").glob("part-*.jsonl.gz")):
+        all_events += [json.loads(line) for line in gzip.open(part, "rt")]
+
+    impressions = [e for e in all_events if e["type"] == "impression"]
+    assert len(impressions) == 100 * 50
+    assert all(1 <= e["position"] <= 50 for e in impressions)
+    assert len({e["event_id"] for e in all_events}) == len(all_events)
+
+    # Randomized sessions mark all their impressions and nothing else.
+    randomized = {e["request_id"] for e in impressions if e.get("randomized")}
+    assert 0 < len(randomized) < 30
+    assert all(e.get("randomized") for e in impressions if e["request_id"] in randomized)
+    assert not any(e.get("randomized") for e in all_events if e["type"] != "impression")
+
+    clicks = [e for e in all_events if e["type"] == "click"]
+    carts = [e for e in all_events if e["type"] == "add_to_cart"]
+    orders = [e for e in all_events if e["type"] == "order"]
+    assert len(clicks) > 0
+    assert len(orders) <= len(carts) <= len(clicks)
+    for o in orders:
+        assert "order_id" in o and o["quantity"] >= 1 and o["value_minor"] > 0
+    # Events end at ref_date (actions trail their impression by at most ~3 min); seed shifts
+    # them so ref_date lands on the present.
+    ref = datetime.fromisoformat(
+        json.loads((out / "simulation_params.json").read_text())["ref_date"]
+    )
+    latest = max(datetime.fromisoformat(e["ts"]) for e in all_events)
+    assert ref - timedelta(days=30) <= latest <= ref + timedelta(minutes=3)
+
+
+def test_simulate_is_deterministic(raw_dir: Path, tmp_path: Path) -> None:
+    hashes = []
+    for name in ("a", "b"):
+        out = tmp_path / name
+        build(raw_dir, out)
+        run_simulate(out)
+        files = sorted((out / "events").glob("*.gz")) + [
+            out / "users.jsonl",
+            out / "simulation_params.json",
+        ]
+        hashes.append([hashlib.sha256(f.read_bytes()).hexdigest() for f in files])
+    assert hashes[0] == hashes[1]

@@ -25,7 +25,11 @@ type Target struct {
 	Tenant        tenant.ID
 	ConfigVersion int
 	Mapper        *catalog.Mapper
-	Registry      *catalog.Registry
+	// VendorMapper extracts vendor features from product payloads (nil without a
+	// catalog.vendor_mapping); Vendors stores them.
+	VendorMapper *catalog.VendorMapper
+	Vendors      VendorWriter
+	Registry     *catalog.Registry
 	// TextEmbedder fills the `text` vector from Product.EmbeddingText.
 	TextEmbedder pipeline.Embedder
 	// ImageEmbedder fills the `image` vector from the main image; nil skips image vectors.
@@ -65,6 +69,8 @@ type Result struct {
 	Stale        int
 	Invalid      int
 	MissingImage int
+	// Vendors counts vendor feature updates written.
+	Vendors int
 }
 
 // Add accumulates r2 into r.
@@ -74,6 +80,7 @@ func (r *Result) Add(r2 Result) {
 	r.Stale += r2.Stale
 	r.Invalid += r2.Invalid
 	r.MissingImage += r2.MissingImage
+	r.Vendors += r2.Vendors
 }
 
 // Processor applies batches of catalog events.
@@ -128,6 +135,7 @@ func (p *Processor) Process(ctx context.Context, t *Target, events []catalog.Pro
 	var res Result
 	var upserts []pipeline.IndexDoc
 	var deletes []pipeline.IndexDelete
+	vendors := map[string]catalog.Vendor{}
 	for _, e := range latestPerProduct(events) {
 		if e.TenantID != string(t.Tenant) {
 			res.Invalid++
@@ -147,6 +155,14 @@ func (p *Processor) Process(ctx context.Context, t *Target, events []catalog.Pro
 			p.log.Warn("invalid product", "tenant", t.Tenant, "product_id", e.ProductID, "event_id", e.EventID, "errors", errs)
 			continue
 		}
+		if v, ok := t.VendorMapper.Extract(e.Product); ok && prod.VendorID != "" {
+			v.ID = prod.VendorID
+			if errs := v.Validate("/vendor"); len(errs) > 0 {
+				p.log.Warn("invalid vendor fields in product skipped", "tenant", t.Tenant, "product_id", e.ProductID, "errors", errs)
+			} else {
+				vendors[prod.ProductID] = v
+			}
+		}
 		upserts = append(upserts, pipeline.IndexDoc{Product: prod, SourceVersion: e.SourceVersion})
 	}
 
@@ -165,6 +181,7 @@ func (p *Processor) Process(ctx context.Context, t *Target, events []catalog.Pro
 			res.UpsertedIDs = append(res.UpsertedIDs, d.Product.ProductID)
 		}
 		res.MissingImage += missing
+		res.Vendors = p.writeVendors(ctx, t, fresh, vendors)
 	}
 
 	if len(deletes) > 0 {
@@ -186,6 +203,31 @@ func (p *Processor) Process(ctx context.Context, t *Target, events []catalog.Pro
 		res.DeletedIDs = ids
 	}
 	return res, nil
+}
+
+// VendorWriter stores vendor features taken from product payloads.
+type VendorWriter interface {
+	PutVendors(ctx context.Context, tid tenant.ID, vendors []catalog.Vendor) error
+}
+
+// writeVendors stores the vendor fields of freshly indexed products (stale events carry older
+// vendor data). A store failure is logged, not retried: vendor features must not stall catalog
+// indexing, and the next product or vendor update rewrites them.
+func (p *Processor) writeVendors(ctx context.Context, t *Target, fresh []pipeline.IndexDoc, byProduct map[string]catalog.Vendor) int {
+	if t.Vendors == nil || len(byProduct) == 0 {
+		return 0
+	}
+	var vs []catalog.Vendor
+	for _, d := range fresh {
+		if v, ok := byProduct[d.Product.ProductID]; ok {
+			vs = append(vs, v)
+		}
+	}
+	if err := t.Vendors.PutVendors(ctx, t.Tenant, vs); err != nil {
+		p.log.Warn("vendor features not stored", "tenant", t.Tenant, "vendors", len(vs), "err", err)
+		return 0
+	}
+	return len(vs)
 }
 
 func (p *Processor) writeVectors(ctx context.Context, t *Target, docs []pipeline.IndexDoc) (int, error) {

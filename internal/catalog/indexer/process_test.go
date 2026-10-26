@@ -11,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
@@ -281,5 +284,80 @@ func TestProcessAllChunksConcurrently(t *testing.T) {
 		if v != 2 {
 			t.Errorf("%s indexed at v%d, want the latest (2)", id, v)
 		}
+	}
+}
+
+type fakeVendors struct {
+	got  []catalog.Vendor
+	fail error
+}
+
+func (f *fakeVendors) PutVendors(_ context.Context, _ tenant.ID, vs []catalog.Vendor) error {
+	f.got = append(f.got, vs...)
+	return f.fail
+}
+
+func withVendor(e catalog.ProductEvent, vendor map[string]any) catalog.ProductEvent {
+	var doc map[string]any
+	_ = json.Unmarshal(e.Product, &doc)
+	doc["vendor"] = vendor
+	e.Product, _ = json.Marshal(doc)
+	return e
+}
+
+func TestProcessStoresVendorFieldsOfFreshProducts(t *testing.T) {
+	ctx := context.Background()
+	tg, _, _, _ := newTarget(t)
+	vm, err := catalog.NewVendorMapper(catalog.VendorMapping{"score": {Path: "$.vendor.stars", Min: ptr(0.0), Max: ptr(5.0)}, "verified": {Path: "$.vendor.verified"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	vendors := &fakeVendors{}
+	tg.VendorMapper, tg.Vendors = vm, vendors
+	p := newProc()
+	if _, err := p.Process(ctx, tg, []catalog.ProductEvent{withVendor(upsert("a", 2, ""), map[string]any{"id": "v1", "stars": 4, "verified": true})}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Process(ctx, tg, []catalog.ProductEvent{
+		withVendor(upsert("a", 1, ""), map[string]any{"id": "v1", "stars": 1}), // stale: older vendor data
+		withVendor(upsert("b", 1, ""), map[string]any{"id": "v2", "stars": "bad"}),
+		withVendor(upsert("c", 1, ""), map[string]any{"id": "v3"}), // nothing mapped
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vendors.got) != 1 || vendors.got[0].ID != "v1" || *vendors.got[0].Score != 0.8 || !*vendors.got[0].Verified || res.Vendors != 0 {
+		t.Errorf("stored %+v, res %+v; want only v1 from the fresh first event", vendors.got, res)
+	}
+
+	vendors.fail = errors.New("redis down")
+	res, err = p.Process(ctx, tg, []catalog.ProductEvent{withVendor(upsert("d", 1, ""), map[string]any{"id": "v4", "stars": 5})})
+	if err != nil || len(res.UpsertedIDs) != 1 || res.Vendors != 0 {
+		t.Errorf("a vendor store failure must not fail indexing: res %+v err %v", res, err)
+	}
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func TestApplyVendorTopic(t *testing.T) {
+	vendors := &fakeVendors{}
+	c := &Consumer{builder: &Builder{Vendors: vendors}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	rec := func(e catalog.VendorEvent) *kgo.Record {
+		b, _ := json.Marshal(e)
+		r := &kgo.Record{Topic: catalog.TopicVendor, Key: e.Key(), Value: b}
+		for k, v := range e.Headers() {
+			r.Headers = append(r.Headers, kgo.RecordHeader{Key: k, Value: []byte(v)})
+		}
+		return r
+	}
+	good := rec(catalog.NewVendorEvent(string(tid), catalog.Vendor{ID: "v1", Score: ptr(0.9)}, time.Now()))
+	bad := rec(catalog.NewVendorEvent(string(tid), catalog.Vendor{ID: "v2", Score: ptr(9.0)}, time.Now()))
+	res, err := c.apply(context.Background(), []*kgo.Record{good, bad, {Topic: catalog.TopicVendor, Value: []byte("{")}})
+	if err != nil || res.Vendors != 1 || res.Invalid != 2 || len(vendors.got) != 1 || vendors.got[0].ID != "v1" {
+		t.Errorf("res %+v err %v stored %+v", res, err, vendors.got)
+	}
+	vendors.fail = errors.New("redis down")
+	if _, err := c.apply(context.Background(), []*kgo.Record{good}); err == nil {
+		t.Error("a store failure on the vendor topic retries the batch")
 	}
 }

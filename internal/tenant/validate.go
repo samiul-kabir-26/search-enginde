@@ -46,6 +46,7 @@ func (c *Config) Validate(ctx context.Context, deps ValidationDeps) []platform.F
 	c.validateBudgets(&v, deps.Plan)
 	v.add(catalog.ValidateMapping(c.Catalog.FieldMapping)...)
 	v.add(catalog.ValidateCustomFields(c.Catalog.CustomFields, deps.Plan.MaxCustomFields)...)
+	v.add(catalog.ValidateVendorMapping(c.Catalog.VendorMapping)...)
 	reg, err := catalog.NewRegistry(c.Catalog.CustomFields)
 	if err != nil {
 		reg, _ = catalog.NewRegistry(nil)

@@ -31,6 +31,9 @@ type Builder struct {
 	Centroids *centroids.Store
 	// BYO enables tenants with BYO embedders and vector stores.
 	BYO *registry.BYO
+	// Vendors stores vendor features from catalog.vendor.v1 and catalog.vendor_mapping (nil
+	// disables both).
+	Vendors VendorWriter
 }
 
 // ErrBYO marks a failure building or calling a tenant's own (BYO) provider. Such failures are
@@ -75,7 +78,11 @@ func (b *Builder) BuildVersion(ctx context.Context, id tenant.ID, v int) (*Targe
 	if cfg.Stores.Lexical.Provider != tenant.ProviderPlatform {
 		return nil, Stores{}, fmt.Errorf("tenant %s: the lexical index is platform-hosted only", id)
 	}
-	t := &Target{Tenant: id, ConfigVersion: version, Mapper: mapper, Registry: reg}
+	vendorMapper, err := catalog.NewVendorMapper(cfg.Catalog.VendorMapping)
+	if err != nil {
+		return nil, Stores{}, fmt.Errorf("tenant %s: %w", id, err)
+	}
+	t := &Target{Tenant: id, ConfigVersion: version, Mapper: mapper, Registry: reg, VendorMapper: vendorMapper, Vendors: b.Vendors}
 	var plan tenant.Plan
 	if uses(cfg, tenant.ProviderBYO) {
 		if b.BYO == nil {

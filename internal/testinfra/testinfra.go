@@ -6,6 +6,8 @@ package testinfra
 
 import (
 	"context"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -21,6 +23,7 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 	tcredpanda "github.com/testcontainers/testcontainers-go/modules/redpanda"
 	tcvault "github.com/testcontainers/testcontainers-go/modules/vault"
+	"github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
@@ -31,6 +34,7 @@ const (
 	RedpandaImage   = "redpandadata/redpanda:v26.2.6"
 	MySQLImage      = "mysql:8.4.13"
 	RedisImage      = "redis:7.4.11-alpine"
+	ClickHouseImage = "clickhouse/clickhouse-server:26.8.34.13-alpine"
 	// BYO vector stores and secrets (M5); not part of the Compose stack.
 	PgvectorImage = "pgvector/pgvector:0.8.7-pg17-trixie"
 	MilvusImage   = "milvusdb/milvus:v2.6.25"
@@ -96,6 +100,95 @@ func Redpanda(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return addr
+}
+
+// InternalBroker is the address other containers on a Network use to reach RedpandaOn.
+const InternalBroker = "redpanda:29092"
+
+// Network creates a Docker network for containers that talk to each other, removed at cleanup.
+func Network(t *testing.T) *testcontainers.DockerNetwork {
+	t.Helper()
+	nw, err := network.New(context.Background())
+	if err != nil {
+		t.Fatalf("create network: %v", err)
+	}
+	testcontainers.CleanupNetwork(t, nw)
+	return nw
+}
+
+// RedpandaOn starts Redpanda on nw, reachable there at InternalBroker, and returns the seed
+// broker for the test process.
+func RedpandaOn(t *testing.T, nw *testcontainers.DockerNetwork) string {
+	t.Helper()
+	ctx := context.Background()
+	c, err := tcredpanda.Run(ctx, RedpandaImage, network.WithNetwork([]string{"redpanda-host"}, nw),
+		tcredpanda.WithListener(InternalBroker), tcredpanda.WithAutoCreateTopics())
+	terminate(t, c)
+	if err != nil {
+		t.Fatalf("start redpanda: %v", err)
+	}
+	addr, err := c.KafkaSeedBroker(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return addr
+}
+
+// ClickHouse starts ClickHouse on nw with database searchengine (user and password "search"),
+// applies db/migrations/clickhouse/*.up.sql in order, with the Kafka engine pointed at
+// InternalBroker, and returns the native host:port.
+func ClickHouse(t *testing.T, nw *testcontainers.DockerNetwork) string {
+	t.Helper()
+	ctx := context.Background()
+	c, err := testcontainers.Run(ctx, ClickHouseImage, network.WithNetwork([]string{"clickhouse"}, nw),
+		testcontainers.WithExposedPorts("9000/tcp", "8123/tcp"),
+		testcontainers.WithEnv(map[string]string{
+			"CLICKHOUSE_DB": "searchengine", "CLICKHOUSE_USER": "search", "CLICKHOUSE_PASSWORD": "search",
+			"CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": "1",
+		}),
+		testcontainers.WithWaitStrategy(wait.ForHTTP("/ping").WithPort("8123/tcp").WithStartupTimeout(2*time.Minute)))
+	terminate(t, c)
+	if err != nil {
+		t.Fatalf("start clickhouse: %v", err)
+	}
+	addr, err := c.PortEndpoint(ctx, "9000/tcp", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, here, _, _ := runtime.Caller(0)
+	ups, err := filepath.Glob(filepath.Join(filepath.Dir(here), "..", "..", "db", "migrations", "clickhouse", "*.up.sql"))
+	if err != nil || len(ups) == 0 {
+		t.Fatalf("clickhouse migrations: %v", err)
+	}
+	sort.Strings(ups)
+	for _, f := range ups {
+		b, err := os.ReadFile(f) //nolint:gosec // repository migration files
+		if err != nil {
+			t.Fatal(err)
+		}
+		sql := strings.ReplaceAll(string(b), "'redpanda:9092'", "'"+InternalBroker+"'")
+		for _, stmt := range strings.Split(sql, ";\n") {
+			if strings.TrimSpace(stripComments(stmt)) == "" {
+				continue
+			}
+			code, out, err := c.Exec(ctx, []string{"clickhouse-client", "-u", "search", "--password", "search", "-d", "searchengine", "-q", stmt})
+			if err != nil || code != 0 {
+				msg, _ := io.ReadAll(out)
+				t.Fatalf("%s: exit %d %v: %s", filepath.Base(f), code, err, msg)
+			}
+		}
+	}
+	return addr
+}
+
+func stripComments(sql string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(sql, "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "--") {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
 }
 
 // MySQL starts MySQL, applies db/migrations/mysql/*.up.sql in order and returns a DSN.

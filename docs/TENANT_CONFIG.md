@@ -55,7 +55,11 @@ All tenant-scoped tables index `(tenant_id, ...)` as the leading column.
     },
     "custom_fields": [
       { "name": "season", "type": "keyword", "source": "$.extra.season", "filterable": true, "facetable": true }
-    ]
+    ],
+    "vendor_mapping": {
+      "score": { "path": "$.vendor.rating", "min": 0, "max": 5 },
+      "verified": "$.vendor.verified"
+    }
   },
 
   "query": {
@@ -173,6 +177,8 @@ The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v
 
 **Catalog mapping and custom fields** (PLAN.md R1). `field_mapping` maps canonical fields to RFC 9535 JSONPath expressions over the tenant's product JSON; `product_id`, `title`, `category_path`, `price_minor` and `currency` must be mapped, and `tenant_id`, `category_ids` and `listing_completeness` are derived, never mapped. `custom_fields` adds tenant fields: `{name, type, source, filterable, facetable, searchable, sortable, required}` with `type` one of `keyword`, `keyword[]`, `text`, `int`, `float`, `bool`, `date`. They are stored under `custom.{name}` (explicit OpenSearch mapping per index version, Qdrant payload index when filterable) and addressed as `custom.{name}` in filters, facets and CEL. Adding a field is an online change; changing a field's type or making it filterable needs a re-index.
 
+**Vendor mapping** (PLAN.md R9, optional). `vendor_mapping` reads vendor features from the product payload: a field (`score`, `on_time_dispatch_rate`, `dispute_rate`, `response_hours`, `verified`) maps to a JSONPath, or to `{path, min, max}`, which rescales a score or rate from the tenant's own range to [0, 1] (clamped). Values are stored per mapped `vendor_id` as online features in Redis, never in the search indexes, and only for products the indexer actually applies (stale events are ignored); a product with out-of-range values is still indexed, its vendor fields are skipped. Vendor data that changes independently of products goes through `PUT /v1/vendors` or the `catalog.vendor.v1` topic instead (`docs/API.md` §1), so a vendor change never needs a reindex. Without a mapping, vendors keep the declared feature defaults until the tenant sends them.
+
 ## 5. Validation rules (enforced on publish)
 
 **Budgets**
@@ -206,9 +212,10 @@ The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v
 **Mapping**
 13. `field_mapping` is a JSONPath per field. Keys must be mappable canonical fields, every mandatory field must be mapped, and every expression must parse. It is validated against a sample payload supplied in onboarding step 2.
 14. `custom_fields` names match `^[a-z][a-z0-9_]{0,62}$` and are unique, their count is within the plan cap, `text` fields can only be searchable, only `text`/`keyword` fields can be searchable, `date` fields cannot be facets, and `keyword[]` fields cannot be sortable.
+15. `vendor_mapping` keys are vendor fields, paths parse, and `{min, max}` (both set, `max > min`) is only used on `score` and the rates.
 
 **Facets**
-15. Facet fields must be facetable; numeric facets need `ranges`, keyword facets cannot have them; at most 20 facets, `size` ≤ 100.
+16. Facet fields must be facetable; numeric facets need `ranges`, keyword facets cannot have them; at most 20 facets, `size` ≤ 100.
 
 Rules 3–5 probe the tenant's endpoints when a draft is saved or validated and when it is published (5 s per probe; successful probes are remembered for 30 s, failures are always re-probed). BYO providers also need a plan with `byo_allowed` (`plan_forbids_byo`).
 

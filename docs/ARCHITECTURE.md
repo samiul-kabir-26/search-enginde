@@ -4,11 +4,13 @@
 
 | Binary | Plane | Responsibility |
 |---|---|---|
-| `search-api` | Data | Stateless. Resolves tenant config, executes the pipeline, ingests events. Horizontally scaled. |
+| `search-api` | Data | Stateless. Resolves tenant config, executes the pipeline, ingests events (`POST /v1/events` → Kafka) and vendor features (`PUT /v1/vendors` → Redis), and emits an impression per returned result. Horizontally scaled. |
 | `control-api` | Control | Tenant sign-up, users and API keys, config drafts and versions, onboarding state, catalog uploads and index jobs, the playground proxy, model registration and connection tests (M5), ads campaigns (M8), and the platform admin API. Issues JWTs from a MySQL key ring and serves the JWKS. |
-| `indexer` | Data | Consumes `catalog.product.v1`, maps products to the canonical schema, embeds them via the tenant's embedder, upserts to the lexical and vector stores. Also runs index jobs queued by control-api: it claims them with `FOR UPDATE SKIP LOCKED`, publishes uploads as catalog events, and backfills a new index version. |
-| `featurejob` | Data | Aggregates ClickHouse events into Redis online features on a schedule. |
-| `seed` | Dev | Publishes the prepared dataset as catalog events and creates the `demo` tenant. |
+| `indexer` | Data | Consumes `catalog.product.v1` and `catalog.vendor.v1`, stores vendor features in Redis, maps products to the canonical schema, embeds them via the tenant's embedder, upserts to the lexical and vector stores. Also runs index jobs queued by control-api: it claims them with `FOR UPDATE SKIP LOCKED`, publishes uploads as catalog events, and backfills a new index version. |
+| `featurejob` | Data | Every 10 min, for each live tenant: estimates the position propensity from randomized traffic and aggregates 30 days of ClickHouse events into Redis item features (debiased CTR, CVR, orders) and user features (category affinity, price band). Refreshes category centroids hourly. |
+| `seed` | Dev | Creates the `demo` tenant and publishes the prepared dataset as catalog and vendor events; `seed -events` publishes the simulated interaction history. |
+
+Events: `search.events.v1` → ClickHouse Kafka engine table `events_kafka` → materialized view → `events` (`ReplacingMergeTree` on `event_id`) → featurejob → Redis `f:{tid}:i|v|u:*` → S4.
 
 Infrastructure: MySQL (control plane), Redis (config invalidation, settings changes, idempotency keys, result snapshots, features, rate limits, ad pacing), Mailpit (dev SMTP), OpenSearch, Qdrant, Kafka/Redpanda, ClickHouse, Triton, S3 object storage (SeaweedFS in dev).
 
@@ -24,7 +26,7 @@ HTTP -> auth (JWT, tid claim) -> rate limit (per tenant) -> tenant resolver (con
           S5 Rank        (scorer, cut to cfg.rank.keep)
           S6 ReRank      (personalization, diversity, ads blend)
      -> response (+ trace when explain=true and the caller is allowed to see it)
-     -> async: emit search.impression events
+     -> async: emit one impression event per returned result (dropped, never waited on, if Kafka is down)
 ```
 
 ## 3. Consumer-side interfaces (`internal/pipeline`)
@@ -66,8 +68,7 @@ type Scorer interface {
 }
 
 type FeatureReader interface {
-	Items(ctx context.Context, tenant TenantID, ids []string) (map[string]Features, error)
-	User(ctx context.Context, tenant TenantID, userID string) (Features, error)
+	Read(ctx context.Context, tenant TenantID, req FeatureRequest) (*OnlineFeatures, error)
 }
 
 type ReRanker interface {
@@ -83,6 +84,7 @@ As implemented:
 - `LexicalIndex.Upsert` and `Delete` take source-versioned documents and return the product IDs rejected as stale, because the lexical index arbitrates catalog event order (`docs/DATA.md` §6). The indexer depends only on the write halves (`LexicalWriter`, `VectorWriter`).
 - `LexicalIndex.Search` takes base filters (always_filters, in the query) and request filters (a post-filter) separately and returns hits plus disjunctive facet counts and the filtered match count; `Docs` hydrates display fields for one page. Retrievers read only ranking fields (OpenSearch doc values, a trimmed Qdrant payload), which is 3–5x faster than loading stored documents for hundreds of hits.
 - Platform stores also implement `IndexVersions` (`Active`, `Latest`, `Create`, `Promote`, `Count`, `Drop`) for the alias-swap re-index.
+- `FeatureReader.Read` takes the product IDs, vendor IDs and user of one request and returns their item, vendor and user features in one pipelined Redis round trip (`internal/providers/features`). It is platform-wide, not per tenant config, so S4 holds it rather than `Providers`.
 - `Providers` bundles a tenant's providers for one config version (embedders, stores, centroids, scorers); the registry builds and caches it. The filter AST lives in `internal/pipeline/filter`, the feature catalog in `internal/pipeline/feature`, and the HTTP layer of search-api in `internal/searchapi`.
 
 `Filter` (the request-level structured filter) is not an interface. It is a typed AST (`FilterExpr`) that each `VectorStore` and `LexicalIndex` adapter translates into its native filter: Qdrant payload filter, OpenSearch `bool.filter`, or a SQL `WHERE` for pgvector. Pushdown is mandatory; post-filtering structured constraints is a bug.
@@ -142,7 +144,8 @@ Each retriever gets `k` from config (default 500, max 2000).
 ### S4 Pre-rank
 
 - An in-process ONNX scorer, or `default_linear` if none is configured.
-- Features come from the candidate payload, retrieval scores and Redis item features, normalized per request: `rrf_score` and `bm25_norm` divide by the request maximum, cosines are used as returned, counts and prices are log-scaled.
+- Features come from the candidate payload, retrieval scores and Redis online features, normalized per request: `rrf_score` and `bm25_norm` divide by the request maximum, cosines are used as returned, counts and prices are log-scaled.
+- Online features (item, vendor and user, `docs/MODELS.md` §4) are read once per request through `resilience.Call` (breaker `online_features`) with at most half of S4's remaining budget, so scoring always has time left. A failure or timeout leaves the declared defaults and is reported as `online_features:<reason>` in the trace; the search never fails for it. User features are carried to S6 on the candidates.
 - Keeps the top `prerank.keep` (default 300). Candidates that are cut stay behind in RRF order, and those cut by S5 stay in pre-rank order, so deep pages (up to the plan's page depth) follow pre-rank and then RRF order.
 
 ### S5 Rank

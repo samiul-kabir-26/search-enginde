@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -32,6 +34,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/catalog"
+	"github.com/zavisoft/search-engine/internal/events"
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/tenant"
 	"github.com/zavisoft/search-engine/internal/tenant/tenantdb"
@@ -43,6 +46,7 @@ type config struct {
 	LogLevel     string
 	MySQLDSN     string
 	KafkaBrokers []string
+	EventsTopic  string
 	S3Endpoint   string
 	S3Region     string
 	S3AccessKey  string
@@ -60,6 +64,7 @@ func loadConfig() (config, error) {
 		LogLevel:      env.String("LOG_LEVEL", "info"),
 		MySQLDSN:      env.Required("MYSQL_DSN"),
 		KafkaBrokers:  strings.Split(env.Required("KAFKA_BROKERS"), ","),
+		EventsTopic:   env.String("KAFKA_TOPIC_EVENTS", events.Topic),
 		S3Endpoint:    env.Required("S3_ENDPOINT"),
 		S3Region:      env.String("S3_REGION", "us-east-1"),
 		S3AccessKey:   env.Required("S3_ACCESS_KEY"),
@@ -76,6 +81,7 @@ type options struct {
 	dataDir    string
 	slug       string
 	skipImages bool
+	events     bool
 	limit      int
 }
 
@@ -84,7 +90,8 @@ func main() {
 	flag.StringVar(&o.dataDir, "data", "data", "dataset directory written by `make data`")
 	flag.StringVar(&o.slug, "tenant", "demo", "tenant slug to create or reuse")
 	flag.BoolVar(&o.skipImages, "skip-images", false, "do not upload images (they must already be in S3)")
-	flag.IntVar(&o.limit, "limit", 0, "publish at most this many products (0 = all)")
+	flag.BoolVar(&o.events, "events", false, "publish the simulated interaction events in data/events instead of the catalog")
+	flag.IntVar(&o.limit, "limit", 0, "publish at most this many products or events (0 = all)")
 	flag.Parse()
 	if err := run(context.Background(), o); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", service, err)
@@ -104,11 +111,6 @@ func run(ctx context.Context, o options) error {
 		return err
 	}
 
-	products, err := readProducts(filepath.Join(o.dataDir, "products.canonical.jsonl"), o.limit)
-	if err != nil {
-		return fmt.Errorf("%w (run `make data` first)", err)
-	}
-
 	db, err := sql.Open("mysql", cfg.MySQLDSN)
 	if err != nil {
 		return fmt.Errorf("mysql: %w", err)
@@ -126,6 +128,15 @@ func run(ctx context.Context, o options) error {
 		return err
 	}
 
+	if o.events {
+		return publishEvents(ctx, cfg.KafkaBrokers, cfg.EventsTopic, tid, o.dataDir, o.limit, log)
+	}
+
+	products, err := readProducts(filepath.Join(o.dataDir, "products.canonical.jsonl"), o.limit)
+	if err != nil {
+		return fmt.Errorf("%w (run `make data` first)", err)
+	}
+
 	imageURL := func(file string) string {
 		return fmt.Sprintf("%s/%s/%s/%s", strings.TrimRight(cfg.S3PublicURL, "/"), cfg.S3Bucket, o.slug, file)
 	}
@@ -134,7 +145,10 @@ func run(ctx context.Context, o options) error {
 			return err
 		}
 	}
-	return publish(ctx, cfg.KafkaBrokers, tid, products, imageURL, log)
+	if err := publish(ctx, cfg.KafkaBrokers, tid, products, imageURL, log); err != nil {
+		return err
+	}
+	return publishVendors(ctx, cfg.KafkaBrokers, tid, filepath.Join(o.dataDir, "vendors.jsonl"), log)
 }
 
 // canonicalProduct is one row of data/products.canonical.jsonl (tools/dataprep/synthesize.py).
@@ -382,4 +396,160 @@ func publish(ctx context.Context, brokers []string, tid tenant.ID, products []ca
 	}
 	log.Info("catalog events published", "tenant", tid, "topic", catalog.Topic, "events", len(products), "took", time.Since(start).Round(time.Millisecond).String())
 	return nil
+}
+
+// vendorRow is one row of data/vendors.jsonl (tools/dataprep/synthesize.py).
+type vendorRow struct {
+	VendorID           string  `json:"vendor_id"`
+	OnTimeDispatchRate float64 `json:"on_time_dispatch_rate"`
+	DisputeRate        float64 `json:"dispute_rate"`
+	ResponseHours      float64 `json:"response_hours"`
+	Verified           bool    `json:"verified"`
+}
+
+// vendorScore is the demo tenant's synthetic vendor score in [0, 1] (docs/DATA.md §4):
+// 0.40·on_time + 0.25·(1 − min(dispute/0.1, 1)) + 0.15·(1 − min(hours/48, 1)) + 0.20·verified.
+// Real tenants compute their own score; the platform only stores it (PLAN.md R9).
+func vendorScore(onTime, dispute, responseHours float64, verified bool) float64 {
+	score := 0.40*onTime + 0.25*(1-math.Min(dispute/0.1, 1)) + 0.15*(1-math.Min(responseHours/48, 1))
+	if verified {
+		score += 0.20
+	}
+	return math.Round(math.Min(math.Max(score, 0), 1)*1e4) / 1e4
+}
+
+// publishVendors publishes data/vendors.jsonl to catalog.vendor.v1; the indexer stores them as
+// online vendor features.
+func publishVendors(ctx context.Context, brokers []string, tid tenant.ID, path string, log *slog.Logger) error {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied dataset path
+	if err != nil {
+		return fmt.Errorf("open vendors: %w", err)
+	}
+	defer f.Close()
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		return fmt.Errorf("kafka client: %w", err)
+	}
+	defer cl.Close()
+	ns := uuid.NewSHA1(uuid.NameSpaceURL, []byte("https://github.com/zavisoft/search-engine/seed/vendors/"+string(tid)))
+	var records []*kgo.Record
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var row vendorRow
+		if err := json.Unmarshal(sc.Bytes(), &row); err != nil {
+			return fmt.Errorf("%s line %d: %w", path, len(records)+1, err)
+		}
+		score := vendorScore(row.OnTimeDispatchRate, row.DisputeRate, row.ResponseHours, row.Verified)
+		v := catalog.Vendor{ID: row.VendorID, Score: &score, OnTimeDispatchRate: &row.OnTimeDispatchRate,
+			DisputeRate: &row.DisputeRate, ResponseHours: &row.ResponseHours, Verified: &row.Verified}
+		e := catalog.NewVendorEvent(string(tid), v, time.Now())
+		e.EventID = uuid.NewSHA1(ns, []byte(row.VendorID)).String()
+		value, err := json.Marshal(e)
+		if err != nil {
+			return fmt.Errorf("encode vendor event: %w", err)
+		}
+		r := &kgo.Record{Topic: catalog.TopicVendor, Key: e.Key(), Value: value}
+		for k, h := range e.Headers() {
+			r.Headers = append(r.Headers, kgo.RecordHeader{Key: k, Value: []byte(h)})
+		}
+		records = append(records, r)
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read vendors: %w", err)
+	}
+	if err := cl.ProduceSync(ctx, records...).FirstErr(); err != nil {
+		return fmt.Errorf("produce vendors: %w", err)
+	}
+	log.Info("vendor events published", "tenant", tid, "topic", catalog.TopicVendor, "vendors", len(records))
+	return nil
+}
+
+// publishEvents publishes the simulated interaction history (data/events) to the events topic.
+// Timestamps are shifted so the newest event lands at the current time, keeping the 7- and
+// 30-day feature windows populated whenever the stack is seeded.
+func publishEvents(ctx context.Context, brokers []string, topic string, tid tenant.ID, dataDir string, limit int, log *slog.Logger) error {
+	params, err := os.ReadFile(filepath.Join(dataDir, "simulation_params.json")) //nolint:gosec // operator-supplied dataset path
+	if err != nil {
+		return fmt.Errorf("%w (run `make data` first)", err)
+	}
+	var sim struct {
+		RefDate time.Time `json:"ref_date"`
+	}
+	if err := json.Unmarshal(params, &sim); err != nil {
+		return fmt.Errorf("simulation_params.json: %w", err)
+	}
+	if sim.RefDate.IsZero() {
+		return errors.New("simulation_params.json: ref_date is missing")
+	}
+	shift := time.Now().UTC().Truncate(time.Second).Sub(sim.RefDate)
+	files, err := filepath.Glob(filepath.Join(dataDir, "events", "part-*.jsonl.gz"))
+	if err != nil || len(files) == 0 {
+		return fmt.Errorf("no data/events/part-*.jsonl.gz (run `make data` first)")
+	}
+
+	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.ProducerLinger(20*time.Millisecond))
+	if err != nil {
+		return fmt.Errorf("kafka client: %w", err)
+	}
+	defer cl.Close()
+	var produceErr atomic.Pointer[error]
+	start, total := time.Now(), 0
+	for _, file := range files {
+		n, err := publishEventFile(ctx, cl, file, topic, tid, shift, limit-total, limit > 0, &produceErr)
+		total += n
+		if err != nil {
+			return err
+		}
+		if limit > 0 && total >= limit {
+			break
+		}
+		log.Info("events progress", "file", filepath.Base(file), "published", total)
+	}
+	if err := cl.Flush(ctx); err != nil {
+		return fmt.Errorf("flush events: %w", err)
+	}
+	if p := produceErr.Load(); p != nil {
+		return fmt.Errorf("produce events: %w", *p)
+	}
+	log.Info("interaction events published", "tenant", tid, "topic", topic, "events", total,
+		"shift", shift.Round(time.Hour).String(), "took", time.Since(start).Round(time.Millisecond).String())
+	return nil
+}
+
+func publishEventFile(ctx context.Context, cl *kgo.Client, file, topic string, tid tenant.ID, shift time.Duration,
+	remaining int, limited bool, produceErr *atomic.Pointer[error]) (int, error) {
+	f, err := os.Open(file) //nolint:gosec // operator-supplied dataset path
+	if err != nil {
+		return 0, fmt.Errorf("open events: %w", err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", file, err)
+	}
+	defer gz.Close()
+	sc := bufio.NewScanner(gz)
+	sc.Buffer(make([]byte, 1<<20), 1<<20)
+	n := 0
+	for sc.Scan() && (!limited || n < remaining) {
+		var e events.Event
+		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
+			return n, fmt.Errorf("%s line %d: %w", file, n+1, err)
+		}
+		e.TS = e.TS.Add(shift)
+		r, err := events.Record(topic, tid, e)
+		if err != nil {
+			return n, err
+		}
+		cl.Produce(ctx, r, func(_ *kgo.Record, err error) {
+			if err != nil {
+				produceErr.CompareAndSwap(nil, &err)
+			}
+		})
+		n++
+	}
+	if err := sc.Err(); err != nil {
+		return n, fmt.Errorf("%s: %w", file, err)
+	}
+	return n, nil
 }

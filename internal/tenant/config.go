@@ -84,9 +84,10 @@ func (b Budgets) ForImage() Budgets {
 
 // CatalogConfig is the `catalog` section.
 type CatalogConfig struct {
-	Ingestion    string                `json:"ingestion"`
-	FieldMapping catalog.FieldMapping  `json:"field_mapping"`
-	CustomFields []catalog.CustomField `json:"custom_fields,omitempty"`
+	Ingestion     string                `json:"ingestion"`
+	FieldMapping  catalog.FieldMapping  `json:"field_mapping"`
+	CustomFields  []catalog.CustomField `json:"custom_fields,omitempty"`
+	VendorMapping catalog.VendorMapping `json:"vendor_mapping,omitempty"`
 }
 
 // QueryConfig is the optional `query` section: tenant additions to the S1 attribute

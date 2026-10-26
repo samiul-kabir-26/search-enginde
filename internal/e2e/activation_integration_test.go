@@ -121,7 +121,7 @@ func TestActivationChangesSearchWithinFiveSeconds(t *testing.T) {
 
 	b := stagestest.Breakers()
 	engine, _ := pipeline.NewEngine(noop.NewMeterProvider().Meter("e2e"),
-		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b), rank.New(b), rerank.New())
+		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b, nil), rank.New(b), rerank.New())
 	providers, _, _ := stagestest.Providers()
 	resolver := tenant.NewResolver(store, 10*time.Minute)
 	svc := &searchapi.Service{Resolver: resolver, Providers: fakeProviders{providers}, Engine: engine,
