@@ -12,6 +12,9 @@ import (
 // Topic carries catalog changes for all tenants (PLAN.md R1).
 const Topic = "catalog.product.v1"
 
+// TopicVendor carries independent vendor feature updates (PLAN.md R9).
+const TopicVendor = "catalog.vendor.v1"
+
 // SchemaVersion is the envelope version sent in the schema-version header.
 const SchemaVersion = 1
 

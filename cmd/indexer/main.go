@@ -23,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -30,6 +31,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog/centroids"
 	"github.com/zavisoft/search-engine/internal/catalog/indexer"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/providers/features"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
 	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
 	"github.com/zavisoft/search-engine/internal/registry"
@@ -45,6 +47,7 @@ type config struct {
 	LogLevel        string
 	ShutdownTimeout time.Duration
 	MySQLDSN        string
+	RedisAddr       string
 	KafkaBrokers    []string
 	OpenSearchURL   string
 	QdrantAddr      string
@@ -73,6 +76,7 @@ func loadConfig() (config, error) {
 		LogLevel:        env.String("LOG_LEVEL", "info"),
 		ShutdownTimeout: env.Duration("SHUTDOWN_TIMEOUT", 15*time.Second),
 		MySQLDSN:        env.Required("MYSQL_DSN"),
+		RedisAddr:       env.Required("REDIS_ADDR"),
 		KafkaBrokers:    strings.Split(env.Required("KAFKA_BROKERS"), ","),
 		OpenSearchURL:   env.Required("OPENSEARCH_URL"),
 		QdrantAddr:      env.Required("QDRANT_ADDR"),
@@ -139,6 +143,8 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 		return fmt.Errorf("mysql: %w", err)
 	}
 	defer db.Close()
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
+	defer rdb.Close()
 	triton, err := grpc.NewClient(cfg.TritonAddr, grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20), grpc.MaxCallSendMsgSize(64<<20)))
 	if err != nil {
@@ -169,7 +175,9 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 	egress := security.NewEgress(security.EgressConfig{Trusted: security.Hosts(cfg.EgressTrusted, cfg.S3Endpoint, cfg.S3PublicURL)})
 	builder := &indexer.Builder{Tenants: tenants, Triton: triton, OpenSearch: osClient, Qdrant: qClient,
 		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
-		BYO:       &registry.BYO{Source: tenants, Secrets: secrets, Egress: egress, Timeout: cfg.BYOTimeout}}
+		BYO:       &registry.BYO{Source: tenants, Secrets: secrets, Egress: egress, Timeout: cfg.BYOTimeout},
+		Vendors:   features.New(rdb),
+	}
 	proc := indexer.NewProcessor(indexer.NewHTTPFetcher(egress, cfg.ImageTimeout), log, cfg.ImageFetchLimit, cfg.Parallelism)
 
 	if backfill {
@@ -184,7 +192,10 @@ func run(ctx context.Context, backfill bool, slug, group string) error {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", platform.Healthz)
-	mux.Handle("GET /readyz", platform.Readyz(map[string]platform.Check{"mysql": db.PingContext}, 2*time.Second))
+	mux.Handle("GET /readyz", platform.Readyz(map[string]platform.Check{
+		"mysql": db.PingContext,
+		"redis": func(ctx context.Context) error { return rdb.Ping(ctx).Err() },
+	}, 2*time.Second))
 	mux.Handle("GET /metrics", tel.MetricsHandler)
 	srv := &http.Server{Addr: cfg.Addr, Handler: platform.Instrument(service, log, mux), ReadHeaderTimeout: 5 * time.Second}
 

@@ -1,0 +1,142 @@
+package searchapi
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/zavisoft/search-engine/internal/auth"
+	"github.com/zavisoft/search-engine/internal/catalog"
+	"github.com/zavisoft/search-engine/internal/events"
+	"github.com/zavisoft/search-engine/internal/pipeline"
+	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/tenant"
+)
+
+// Body limits of the write endpoints.
+const (
+	MaxEventsBodyBytes  = 1 << 20
+	MaxVendorsBodyBytes = 256 << 10
+	MaxVendorsPerBatch  = 500
+)
+
+// EventSink writes interaction events to Kafka.
+type EventSink interface {
+	// Produce writes evs and waits for the acknowledgement.
+	Produce(ctx context.Context, tid tenant.ID, evs []events.Event) error
+	// Emit queues evs without waiting; failures drop them.
+	Emit(tid tenant.ID, evs []events.Event)
+}
+
+// VendorStore applies partial vendor feature updates.
+type VendorStore interface {
+	PutVendors(ctx context.Context, tid tenant.ID, vendors []catalog.Vendor) error
+}
+
+// EventsRequest is the body of POST /v1/events.
+type EventsRequest struct {
+	Events []events.Event `json:"events"`
+}
+
+// EventsResponse is the 202 body of POST /v1/events.
+type EventsResponse struct {
+	Accepted int `json:"accepted"`
+}
+
+func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	p, _ := auth.FromContext(ctx)
+	if s.Events == nil {
+		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "event ingestion is disabled"})
+		return
+	}
+	var req EventsRequest
+	if err := decodeStrictN(r, &req, MaxEventsBodyBytes); err != nil {
+		badRequest(w, platform.FieldError{Path: "", Code: "invalid_json", Message: err.Error()})
+		return
+	}
+	evs, errs := events.ValidateBatch(req.Events, time.Now())
+	if len(errs) > 0 {
+		badRequest(w, errs...)
+		return
+	}
+	// The plan's events rate counts events; the burst admits one full batch.
+	res, err := s.Resolver.Get(ctx, p.Tenant)
+	if !s.resolved(w, p, err) || !s.admit(ctx, w, res, "events", res.Plan.EventsRPS, events.MaxBatchSize, len(evs)) {
+		return
+	}
+	if err := s.Events.Produce(ctx, p.Tenant, evs); err != nil {
+		s.Log.Error("produce events", "tenant", p.Tenant, "events", len(evs), "err", err)
+		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "event ingestion is unavailable; retry the batch"})
+		return
+	}
+	platform.WriteJSON(w, http.StatusAccepted, EventsResponse{Accepted: len(evs)})
+}
+
+// VendorsRequest is the body of PUT /v1/vendors.
+type VendorsRequest struct {
+	Vendors []catalog.Vendor `json:"vendors"`
+}
+
+// VendorsResponse is the body of a successful PUT /v1/vendors.
+type VendorsResponse struct {
+	Updated int `json:"updated"`
+}
+
+func (s *Service) handleVendors(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	p, _ := auth.FromContext(ctx)
+	if s.Vendors == nil {
+		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "vendor updates are disabled"})
+		return
+	}
+	var req VendorsRequest
+	if err := decodeStrictN(r, &req, MaxVendorsBodyBytes); err != nil {
+		badRequest(w, platform.FieldError{Path: "", Code: "invalid_json", Message: err.Error()})
+		return
+	}
+	var errs []platform.FieldError
+	switch n := len(req.Vendors); {
+	case n == 0:
+		errs = append(errs, platform.FieldError{Path: "/vendors", Code: "required", Message: "vendors must not be empty"})
+	case n > MaxVendorsPerBatch:
+		errs = append(errs, platform.FieldError{Path: "/vendors", Code: "max_items", Message: fmt.Sprintf("at most %d vendors per batch", MaxVendorsPerBatch)})
+	}
+	for i, v := range req.Vendors {
+		errs = append(errs, v.Validate(fmt.Sprintf("/vendors/%d", i))...)
+	}
+	if len(errs) > 0 {
+		badRequest(w, errs...)
+		return
+	}
+	res, err := s.Resolver.Get(ctx, p.Tenant)
+	if !s.resolved(w, p, err) || !s.admit(ctx, w, res, "vendors", res.Plan.EventsRPS, MaxVendorsPerBatch, len(req.Vendors)) {
+		return
+	}
+	if err := s.Vendors.PutVendors(ctx, p.Tenant, req.Vendors); err != nil {
+		s.Log.Error("put vendors", "tenant", p.Tenant, "vendors", len(req.Vendors), "err", err)
+		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "vendor updates are unavailable; retry the batch"})
+		return
+	}
+	platform.WriteJSON(w, http.StatusOK, VendorsResponse{Updated: len(req.Vendors)})
+}
+
+// emitImpressions queues one impression per returned result (docs/ARCHITECTURE.md §2). Tenants
+// send clicks, carts and orders that reference resp.RequestID.
+func (s *Service) emitImpressions(tid tenant.ID, resp *SearchResponse, u pipeline.UserContext) {
+	if s.Events == nil || len(resp.Results) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	evs := make([]events.Event, len(resp.Results))
+	for i, r := range resp.Results {
+		evs[i] = events.Event{
+			EventID: uuid.NewString(), Type: events.TypeImpression, TS: now, RequestID: resp.RequestID,
+			ProductID: r.ProductID, Position: r.Position, UserID: u.ID, SessionID: u.SessionID, Sponsored: r.Sponsored,
+		}
+	}
+	s.Events.Emit(tid, evs)
+}

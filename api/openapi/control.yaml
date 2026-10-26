@@ -1508,7 +1508,7 @@ components:
       required: [keys]
     Scope:
       type: string
-      enum: ['search:read', 'search:debug', 'events:write']
+      enum: ['search:read', 'search:debug', 'events:write', 'catalog:write']
     ApiKeyCreate:
       type: object
       properties:
@@ -2028,6 +2028,23 @@ components:
         custom_fields:
           type: array
           items: {$ref: '#/components/schemas/CustomField'}
+        vendor_mapping:
+          type: object
+          description: >-
+            Optional. Vendor feature to a JSONPath in the product payload, or {path, min, max} to
+            rescale a score or rate from the tenant's range to [0, 1]. Values are stored per
+            vendor_id as online ranking features (PLAN.md R9).
+          propertyNames: {enum: [score, on_time_dispatch_rate, dispute_rate, response_hours, verified]}
+          additionalProperties:
+            oneOf:
+              - {type: string, description: JSONPath}
+              - type: object
+                properties:
+                  path: {type: string, description: JSONPath}
+                  min: {type: number}
+                  max: {type: number}
+                required: [path]
+                additionalProperties: false
         samples:
           type: array
           items: *id007

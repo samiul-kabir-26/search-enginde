@@ -114,7 +114,14 @@ paths:
     post:
       operationId: ingestEvents
       summary: Ingest interaction events
-      description: Scope `events:write`. Up to 500 events, deduplicated by `event_id`.
+      description: >-
+        Scope `events:write`. Up to 500 events per batch, validated as a whole (every error is
+        reported) and written to Kafka before the 202; ClickHouse ingests them within seconds and
+        featurejob turns them into online features. Repeated `event_id`s are dropped within a batch
+        and collapsed across batches. search-api already emits an `impression` for every result it
+        returns (same `request_id`), so send clicks, carts, orders and RFQs that reference it, and
+        impressions only for results not served by this API. The tenant comes from the token.
+        The plan's events rate counts events, with a burst of one full batch.
       requestBody:
         required: true
         content:
@@ -122,6 +129,7 @@ paths:
             schema:
               type: object
               required: [events]
+              additionalProperties: false
               properties:
                 events:
                   type: array
@@ -137,9 +145,51 @@ paths:
                 type: object
                 required: [accepted]
                 properties:
-                  accepted: { type: integer }
+                  accepted: { type: integer, description: Events written after dropping repeated event IDs. }
         "400": { $ref: "#/components/responses/Problem" }
         "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
+
+  /v1/vendors:
+    put:
+      operationId: putVendors
+      summary: Update vendor features
+      description: >-
+        Scope `catalog:write`. Up to 500 vendors per batch. Updates are partial: only the fields
+        sent are stored, the rest keep their stored value (or the declared default). The tenant
+        computes these values; they feed the `vendor_*` ranking features (PLAN.md R9) and never
+        require a reindex. The plan's events rate also limits vendor updates, counted per vendor.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vendors]
+              additionalProperties: false
+              properties:
+                vendors:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/VendorFeature" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [updated]
+                properties:
+                  updated: { type: integer }
+        "400": { $ref: "#/components/responses/Problem" }
+        "401": { $ref: "#/components/responses/Problem" }
+        "403": { $ref: "#/components/responses/Problem" }
+        "429": { $ref: "#/components/responses/Problem" }
+        "503": { $ref: "#/components/responses/Problem" }
 
   /healthz:
     get:
@@ -379,16 +429,36 @@ components:
     Event:
       type: object
       required: [event_id, type, ts, product_id]
+      additionalProperties: false
       properties:
         event_id: { type: string, format: uuid }
         type: { type: string, enum: [impression, click, add_to_cart, order, rfq] }
-        ts: { type: string, format: date-time }
-        request_id: { type: string }
-        product_id: { type: string }
-        position: { type: integer, minimum: 1 }
-        user_id: { type: string }
-        session_id: { type: string }
-        sponsored: { type: boolean }
-        order_id: { type: string, description: Required when type is order. }
+        ts: { type: string, format: date-time, description: At most 5 minutes in the future. }
+        request_id: { type: string, maxLength: 256, description: The search response's request_id. }
+        product_id: { type: string, maxLength: 256 }
+        position: { type: integer, minimum: 1, maximum: 10000, description: 1-based result position. Required for impressions. }
+        user_id: { type: string, maxLength: 256 }
+        session_id: { type: string, maxLength: 256 }
+        sponsored: { type: boolean, default: false }
+        randomized:
+          type: boolean
+          default: false
+          description: >-
+            Impressions only. The results were shown in a randomized order; featurejob estimates
+            the examination propensity per position from these requests to debias CTR.
+        order_id: { type: string, maxLength: 256, description: Required when type is order. }
         quantity: { type: integer, minimum: 1, description: Required when type is order. }
-        value_minor: { type: integer, format: int64, description: Required when type is order. }
+        value_minor: { type: integer, format: int64, minimum: 0, description: Required when type is order. }
+
+    VendorFeature:
+      type: object
+      required: [vendor_id]
+      additionalProperties: false
+      minProperties: 2
+      properties:
+        vendor_id: { type: string, maxLength: 256 }
+        score: { type: number, minimum: 0, maximum: 1 }
+        on_time_dispatch_rate: { type: number, minimum: 0, maximum: 1 }
+        dispute_rate: { type: number, minimum: 0, maximum: 1 }
+        response_hours: { type: number, minimum: 0, description: "Raw hours; ranked as min(hours / 48, 1)." }
+        verified: { type: boolean }

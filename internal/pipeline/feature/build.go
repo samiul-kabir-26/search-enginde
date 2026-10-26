@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// Defaults are the declared values for features a candidate does not have (docs/MODELS.md §4).
-// Item and vendor features stay at their defaults until the feature job lands (M6).
+// Defaults are the declared values for features a candidate does not have (docs/MODELS.md §4):
+// a product without recent interactions, a vendor the tenant never sent, an anonymous user.
 func Defaults() map[string]float64 {
 	return map[string]float64{
 		RRFScore: 0, BM25Norm: 0, CosineText: 0, CosineImage: 0, RetrieverCount: 0, PolicyBoost: 0,

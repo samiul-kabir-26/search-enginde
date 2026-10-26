@@ -27,7 +27,7 @@ func engine(t *testing.T) *pipeline.Engine {
 	t.Helper()
 	b := stagestest.Breakers()
 	e, err := pipeline.NewEngine(noop.NewMeterProvider().Meter("test"),
-		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b), rank.New(b), rerank.New())
+		queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b, nil), rank.New(b), rerank.New())
 	if err != nil {
 		t.Fatal(err)
 	}

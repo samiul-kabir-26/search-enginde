@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/go-redis/redis_rate/v10"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/redis/go-redis/v9"
+	"github.com/twmb/franz-go/pkg/kgo"
 	"go.opentelemetry.io/otel"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
@@ -25,8 +27,10 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/catalog/centroids"
+	"github.com/zavisoft/search-engine/internal/events"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/providers/features"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
 	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
 	"github.com/zavisoft/search-engine/internal/registry"
@@ -64,6 +68,8 @@ type config struct {
 	CursorSecret    string
 	ConfigTTL       time.Duration
 	ClickHouse      searchapi.ClickHouseConfig
+	KafkaBrokers    []string
+	KafkaEvents     string
 	ShadowWorkers   int
 	OTLPEndpoint    string
 	Secrets         security.SecretBackend
@@ -96,6 +102,8 @@ func loadConfig() (config, error) {
 			Addr: env.Required("CLICKHOUSE_ADDR"), Database: env.String("CLICKHOUSE_DB", "searchengine"),
 			Username: env.String("CLICKHOUSE_USER", "default"), Password: env.String("CLICKHOUSE_PASSWORD", ""),
 		},
+		KafkaBrokers:  strings.Split(env.Required("KAFKA_BROKERS"), ","),
+		KafkaEvents:   env.String("KAFKA_TOPIC_EVENTS", events.Topic),
 		ShadowWorkers: env.Int("SHADOW_WORKERS", 8),
 		OTLPEndpoint:  env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		Secrets:       security.SecretBackendFromEnv(env),
@@ -169,9 +177,10 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	featureStore := features.New(rdb)
 	engine, err := pipeline.NewEngine(meter,
 		queryunderstanding.New(breakers), retrieval.New(breakers), filter.New(),
-		prerank.New(breakers), rank.New(breakers), rerank.New())
+		prerank.New(breakers, featureStore), rank.New(breakers), rerank.New())
 	if err != nil {
 		return err
 	}
@@ -198,6 +207,27 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Impressions are queued without waiting; a bounded buffer and delivery timeout drop them
+	// (counted) when Kafka is unavailable, so search never waits on the events topic.
+	kafkaCl, err := kgo.NewClient(kgo.SeedBrokers(cfg.KafkaBrokers...), kgo.ProducerLinger(5*time.Millisecond),
+		kgo.MaxBufferedRecords(50_000), kgo.RecordDeliveryTimeout(30*time.Second))
+	if err != nil {
+		return fmt.Errorf("kafka: %w", err)
+	}
+	defer kafkaCl.Close()
+	producer, err := events.NewProducer(kafkaCl, cfg.KafkaEvents, meter)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := producer.Flush(fctx); err != nil {
+			log.Warn("events not flushed at shutdown", "err", err)
+		}
+	}()
+
 	svc := &searchapi.Service{
 		Resolver:  resolver,
 		Providers: reg,
@@ -206,6 +236,8 @@ func run(ctx context.Context) error {
 		Snapshots: searchapi.NewSnapshots(rdb),
 		Cursors:   searchapi.NewCursors([]byte(cfg.CursorSecret)),
 		Limiter:   redis_rate.NewLimiter(rdb),
+		Events:    producer,
+		Vendors:   featureStore,
 		Log:       log,
 	}
 

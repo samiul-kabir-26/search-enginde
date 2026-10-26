@@ -257,12 +257,17 @@ func (s *Server) stepCatalog(r *http.Request, tid tenant.ID, body []byte) ([]pla
 		Ingestion    string                `json:"ingestion"`
 		FieldMapping catalog.FieldMapping  `json:"field_mapping"`
 		CustomFields []catalog.CustomField `json:"custom_fields"`
-		Samples      []json.RawMessage     `json:"samples"`
+		// VendorMapping optionally reads vendor features from product payloads (PLAN.md R9).
+		VendorMapping catalog.VendorMapping `json:"vendor_mapping"`
+		Samples       []json.RawMessage     `json:"samples"`
 	}
 	if err := strictJSON(body, &req); err != nil {
 		return nil, nil, err
 	}
-	var errs []platform.FieldError
+	errs := catalog.ValidateVendorMapping(req.VendorMapping)
+	for i := range errs {
+		errs[i].Path = strings.TrimPrefix(errs[i].Path, "/catalog")
+	}
 	if req.Ingestion != "events" && req.Ingestion != "upload" {
 		errs = append(errs, fieldErr("/ingestion", "invalid", "ingestion must be events or upload"))
 	}
@@ -298,7 +303,8 @@ func (s *Server) stepCatalog(r *http.Request, tid tenant.ID, body []byte) ([]pla
 		return nil, previews, block(errs...)
 	}
 	warnings, err := s.editDraft(r, tid, StepCatalog, func(c *tenant.Config) error {
-		c.Catalog = tenant.CatalogConfig{Ingestion: req.Ingestion, FieldMapping: req.FieldMapping, CustomFields: req.CustomFields}
+		c.Catalog = tenant.CatalogConfig{Ingestion: req.Ingestion, FieldMapping: req.FieldMapping,
+			CustomFields: req.CustomFields, VendorMapping: req.VendorMapping}
 		return nil
 	})
 	return warnings, map[string]any{"previews": previews}, err

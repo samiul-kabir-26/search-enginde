@@ -74,17 +74,20 @@ On the 2026-10-25 data this selects 10,000 of 91,352 candidates across 162 produ
 
 Vendors (`data/vendors.jsonl`) have: `vendor_id`, `name`, `verified`, `tier` (`basic`/`gold`), `on_time_dispatch_rate`, `dispute_rate`, `response_hours`, `ship_regions`. These values are drawn so that vendor score correlates with hidden quality.
 
+The demo tenant's vendor score (PLAN.md R9) is computed by `seed` from these fields and published with them to `catalog.vendor.v1`: `score = 0.40·on_time + 0.25·(1 − min(dispute/0.1, 1)) + 0.15·(1 − min(hours/48, 1)) + 0.20·verified`, in [0, 1]. Real tenants send their own score; the platform only stores it.
+
 ## 5. Synthetic users and events (`tools/dataprep/simulate.py`)
 
 The goal is a learnable ranking signal, not noise.
 
 **Hidden ground truth (never exported to features).**
-- Per item: quality `q ~ Beta(2,2)`.
-- Per user: a category affinity vector (Dirichlet over top-level categories), a price band, and a region.
+- Per item: quality `q ~ Beta(2,2)` (`data/hidden/item_quality.jsonl`).
+- Per user: a category affinity vector (Dirichlet over 2–5 top-level categories), a price band, and a region (`data/users.jsonl`). featurejob never reads this file; it derives user features from events.
 
 **Sessions.**
-- Sample a user and a query. 70% of queries are text from the eval-style query generator (§7); 30% are category browse.
-- Retrieve the top 50 by a naive BM25 baseline. Positions are randomized for 10% of sessions; these are used for propensity estimation.
+- 40,000 sessions over 5,000 users, spread over the 30 days before `--ref-date`, 50 impressions each (2M impressions).
+- Sample a user and a query. 70% of queries are text from templates over the catalog (`{color|brand|material} {product_type}` or a product type); 30% browse one of the user's affinity categories.
+- Retrieve the top 50 by a naive in-memory BM25 baseline. Positions are shuffled for 10% of sessions, and those impressions carry `"randomized": true`; featurejob estimates the position propensity from them.
 
 **Examination and actions.**
 - Examination probability: `p_exam(pos) = 1 / pos^0.7`.
@@ -92,8 +95,10 @@ The goal is a learnable ranking signal, not noise.
 - Cart and order follow on click with their own logistic models.
 
 **Outputs.**
-- Events are written as JSONL in the `/v1/events` schema and published to Kafka by `cmd/seed --events`.
-- Store the generator parameters in `data/simulation_params.json` for reproducibility.
+- Events are written as gzipped JSONL in the `/v1/events` schema (`data/events/part-*.jsonl.gz`); clicks follow their impression by 2–60 s, carts and orders shortly after.
+- Event IDs are drawn from the seeded RNG and the gzip headers carry no timestamp, so the same seed gives byte-identical files (pytest checks this). The full run takes about 2.5 minutes.
+- The generator parameters, including the hidden ones, are stored in `data/simulation_params.json` for reproducibility.
+- `make seed-events` (`seed -events`) publishes the events to `search.events.v1`, shifting every timestamp so `--ref-date` lands on the current time; the 7- and 30-day feature windows are then populated whenever the stack is seeded. ClickHouse ingests them through the Kafka engine, and `make features` (or the scheduled featurejob) turns them into online features.
 
 ## 6. Vectorization and indexing
 
@@ -110,6 +115,8 @@ The goal is a learnable ranking signal, not noise.
 - Events that fail mapping or validation are logged and counted as invalid, never retried; store or model failures retry the batch with backoff (at-least-once).
 
 **Topic retention.** `catalog.product.v1` is compacted (`cleanup.policy=compact`), so a backfill reads roughly one event per product rather than the whole history.
+
+**Vendor events (`catalog.vendor.v1`, PLAN.md R9).** Vendor data that changes independently of products: key `{tenant_id}:{vendor_id}`, headers `tenant-id`, `event-id`, `schema-version`, value `{event_id, tenant_id, ts, vendor: {vendor_id, score?, on_time_dispatch_rate?, dispute_rate?, response_hours?, verified?}}`. The topic is compacted and updates are partial, so producers should send every field. The indexer's consumer group reads it next to the catalog topic and writes `f:{tid}:v:{vendor_id}` in Redis; undecodable or out-of-range events are counted invalid and skipped, a Redis failure retries the batch. Vendor fields mapped from product payloads (`catalog.vendor_mapping`) are written by the same indexer, for products it actually applies; a Redis failure there is logged and does not stall catalog indexing.
 
 **Category centroids.** Every backfill builds per-category centroids of the new version's `text` vectors (mean over a category's products, leaf and ancestors, re-normalized, at least 3 products) and stores them in S3 at `centroids/{tenant}/v{n}.bin` with a sha256 manifest before promoting the version. `featurejob centroids -tenant <slug>` (`make centroids`) refreshes them for the active version.
 
@@ -172,9 +179,9 @@ data/
   products.raw.jsonl
   products.canonical.jsonl
   vendors.jsonl
-  users.jsonl
+  users.jsonl                # hidden user ground truth (simulate.py)
   campaigns.jsonl
-  events/part-*.jsonl.gz
+  events/part-*.jsonl.gz     # simulated interaction events (simulate.py)
   images/{image_id}.jpg
   eval/image_queries.jsonl
   eval/text_queries.jsonl

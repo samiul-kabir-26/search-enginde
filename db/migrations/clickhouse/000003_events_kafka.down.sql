@@ -1,0 +1,3 @@
+DROP VIEW IF EXISTS events_mv;
+DROP TABLE IF EXISTS events_kafka;
+ALTER TABLE events DROP COLUMN IF EXISTS randomized;

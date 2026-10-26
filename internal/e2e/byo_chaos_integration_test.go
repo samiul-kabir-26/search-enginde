@@ -196,7 +196,7 @@ func TestBYOChaos(t *testing.T) {
 			t.Fatal(err)
 		}
 		e, err := pipeline.NewEngine(noop.NewMeterProvider().Meter("chaos"),
-			queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b), rank.New(b), rerank.New())
+			queryunderstanding.New(b), retrieval.New(b), filter.New(), prerank.New(b, nil), rank.New(b), rerank.New())
 		if err != nil {
 			t.Fatal(err)
 		}
