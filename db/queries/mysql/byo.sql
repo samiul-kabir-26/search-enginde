@@ -6,9 +6,9 @@ SELECT id, tenant_id, kind, ciphertext, dek_wrapped, created_at, rotated_at
 FROM tenant_secrets WHERE tenant_id = ? AND id = ?;
 
 -- name: CreateTenantModel :exec
-INSERT INTO tenant_models (id, tenant_id, kind, type, name, version, artifact_uri, endpoint, secret_ref,
-  input_schema, output_schema, settings, status)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'registered');
+INSERT INTO tenant_models (id, tenant_id, kind, type, name, version, artifact_uri, artifact_sha256, endpoint,
+  secret_ref, input_schema, output_schema, settings, status, validated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: GetTenantModel :one
 SELECT * FROM tenant_models WHERE tenant_id = ? AND id = ?;

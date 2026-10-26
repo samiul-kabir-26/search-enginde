@@ -91,7 +91,7 @@ services:
     command:
       - |
         set -e
-        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_VENDOR:-catalog.vendor.v1} ${KAFKA_TOPIC_EVENTS}; do
+        for t in ${KAFKA_TOPIC_CATALOG} ${KAFKA_TOPIC_VENDOR:-catalog.vendor.v1} ${KAFKA_TOPIC_EVENTS} ${KAFKA_TOPIC_REQUESTS:-search.requests.v1}; do
           rpk topic create "$$t" -p 6 -r 1 -X brokers=redpanda:9092 || rpk topic describe "$$t" -X brokers=redpanda:9092 >/dev/null
         done
         # The catalog and vendor topics keep the latest event per product or vendor, so backfills
@@ -232,6 +232,7 @@ services:
       JWKS_URL: http://control-api:8081/.well-known/jwks.json
       SEARCH_API_URL: http://search-api:8080
       SMTP_ADDR: mailpit:1025
+      ONNXRUNTIME_LIB: /usr/local/lib/libonnxruntime.so
     depends_on: &app-deps
       mysql: { condition: service_healthy }
       redis: { condition: service_healthy }

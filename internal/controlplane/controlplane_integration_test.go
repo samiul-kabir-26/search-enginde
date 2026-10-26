@@ -76,6 +76,7 @@ type env struct {
 	verifier *auth.Verifier
 	search   *fakeSearch
 	byo      *registry.BYO
+	models   *memModels
 }
 
 // fakeSearch records what the playground proxy forwards.
@@ -112,7 +113,7 @@ func newEnv(t *testing.T) *env {
 	if err := keys.Load(ctx); err != nil {
 		t.Fatal(err)
 	}
-	e := &env{t: t, db: db, rdb: rdb, mailer: &fakeMailer{}, keys: keys, search: &fakeSearch{}}
+	e := &env{t: t, db: db, rdb: rdb, mailer: &fakeMailer{}, keys: keys, search: &fakeSearch{}, models: &memModels{objects: map[string][]byte{}}}
 	search := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		v := auth.NewLocalVerifier(keys, "http://issuer")
 		p, err := v.Verify(r.Context(), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
@@ -138,6 +139,7 @@ func newEnv(t *testing.T) *env {
 		Mailer: e.mailer, Redis: rdb, Idem: controlplane.NewIdempotency(rdb), Presign: s3.NewPresignClient(s3c),
 		UploadBucket: "catalog-uploads", SearchURL: search.URL, HTTPClient: http.DefaultClient,
 		AppBaseURL: "http://console", PlatformEmbedder: registry.PlatformEmbedderInfo, Log: log,
+		Models: e.models, ModelBucket: "tenant-models", ONNXReady: initONNX(t),
 	}
 	mux := http.NewServeMux()
 	srv.Routes(mux)

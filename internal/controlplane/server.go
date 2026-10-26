@@ -44,7 +44,13 @@ type Server struct {
 	PlatformEmbedder func(id string) (tenant.EmbedderInfo, bool)
 	// BYO builds and probes tenant endpoints (secrets, egress) for models and connections.
 	BYO *registry.BYO
-	Log *slog.Logger
+	// Models holds learned scorer artifacts (platform manifests, tenant ONNX uploads) in
+	// ModelBucket, where POST /models/uploads presigns.
+	Models      ModelStore
+	ModelBucket string
+	// ONNXReady reports that ONNX Runtime loaded, so uploaded models can be dry-run.
+	ONNXReady bool
+	Log       *slog.Logger
 
 	probes probeCache
 }

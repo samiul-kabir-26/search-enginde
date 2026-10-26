@@ -28,7 +28,7 @@ const (
 const MaxVendorsPerRequest = 300
 
 // ResponseHoursCap normalizes vendor_response_hours: min(hours / cap, 1).
-const ResponseHoursCap = 48.0
+const ResponseHoursCap = feature.ResponseHoursCap
 
 // writeBatch is how many keys one pipelined write sends.
 const writeBatch = 500
@@ -235,8 +235,9 @@ func (s *Store) Read(ctx context.Context, tid tenant.ID, req pipeline.FeatureReq
 	}
 
 	out := &pipeline.OnlineFeatures{
-		Items:   make(map[string]map[string]float64, len(items)),
-		Vendors: make(map[string]map[string]float64, len(vcmds)),
+		Items:       make(map[string]map[string]float64, len(items)),
+		Vendors:     make(map[string]map[string]float64, len(vcmds)),
+		VendorAttrs: make(map[string]map[string]any, len(vcmds)),
 	}
 	for i, cmd := range items {
 		if f := floats(cmd.Val(), itemFields); f != nil {
@@ -246,6 +247,7 @@ func (s *Store) Read(ctx context.Context, tid tenant.ID, req pipeline.FeatureReq
 	for i, cmd := range vcmds {
 		if f := vendorFeatures(cmd.Val()); f != nil {
 			out.Vendors[vendors[i]] = f
+			out.VendorAttrs[vendors[i]] = vendorAttrs(cmd.Val())
 		}
 	}
 	if ucmd != nil {
@@ -287,6 +289,24 @@ func vendorFeatures(vals []any) map[string]float64 {
 		}
 	}
 	return raw
+}
+
+// vendorAttrs are the stored vendor values as the tenant sent them, for CEL rules.
+func vendorAttrs(vals []any) map[string]any {
+	out := make(map[string]any, len(vendorFields))
+	for i, name := range vendorFields {
+		if name == catalog.VendorVerified {
+			if v, ok := vals[i].(string); ok {
+				b, _ := strconv.ParseBool(v)
+				out[name] = b
+			}
+			continue
+		}
+		if x, ok := parseFloat(vals[i]); ok {
+			out[name] = x
+		}
+	}
+	return out
 }
 
 func userFeatures(vals []any) *pipeline.UserFeatures {

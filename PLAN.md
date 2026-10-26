@@ -9,7 +9,20 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M6 is done** (M0–M5 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M7 is done** (M0–M6 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M7 verification (2026-10-26, same laptop, dev stack with Triton):
+
+| Check | Result |
+|---|---|
+| Offline eval (nDCG@10) | Held-out test set (2,000 requests, graded: order 3, cart 2, click 1): **`rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain)**, MRR 0.7006 vs 0.5293; **`prerank-gbdt-v1` nDCG@10 0.3348 vs `default_linear` 0.2563 (+0.0641 gain)**, MRR 0.6607 vs 0.5231. Position-debiased (IPW): `rank-gbdt-v1` +0.0243, `prerank-gbdt-v1` +0.0195. Report: `tools/eval/reports/2026-10-26_ranking.md` |
+| Latency / stage budgets | `prerank-gbdt-v1` capped at 120 trees (115 trees selected) takes **3.90 ms** for 2,000 candidates on 1 ORT thread, fitting the 5 ms stage budget (**D69**); `rank-gbdt-v1` (329 trees) takes **1.6 ms** for 50 candidates in-process and ~2 ms via Triton remote KServe v2 |
+| Feature catalog & replay | Dataset builder `featurejob dataset` replayed 1,000,000 impressions / 20,000 requests through Go serving S1/S2 and S4 feature builder (**D68**), training period online features aggregated as of training cutoff to eliminate leak; LightGBM lambdarank models exported to ONNX via onnxmltools with float32 inputs matching catalog schema |
+| Scorer providers | In-process ORT scorer (`providers/scorer/onnx`) with thread tuning (`ONNX_INTRA_OP_THREADS`) and shared session cache; remote KServe v2 scorer (`providers/scorer/kservev2`) supporting Triton `rank_gbdt_v1` with raw and typed tensor formats; registry dynamic factory in `registry/scorers.go` |
+| Model upload & dry-run | Presigned upload URL (`POST /v1/tenants/{tid}/models/uploads`), registration (`POST /models`) with ONNX dry-run against declared feature schema, sha256 validation; Triton model repository sync in `cmd/featurejob publish` (**D70**) |
+| CEL policy engine | `providers/policy` with cel-go restricted env (`item`, `query`), cost limit (1000), AST validation; S3 filter stage evaluates rules concurrently across CPUs with deadline checks and fails open (**D63**–**D65**); `policy_boost` clamped to [-1, 1] applied additively to model output (**D66**) |
+| Live search & explain trace | Query "office chair" with `explain: true` verified S3 filter evaluating CEL policy (3.8 ms), S4 prerank using `platform:prerank-gbdt-v1` (1.7 ms), and S5 rank using `platform:rank-gbdt-v1` (1.6 ms) with 22 features and `policy_boost` applied |
+| Tests & coverage | Go unit tests (`-race`) and integration tests (`-p 1 -race`) pass; pytest clean (11 passed); `make cover` **86.4%** (pipeline 88.0%, stages 94.7%, tenant 83.7%, security 80.8%); `make lint` 0 issues; Redocly clean for `search.yaml` and `control.yaml`; web app typecheck and lint pass |
 
 M6 verification (2026-10-26, same laptop, dev stack with Triton):
 
@@ -164,6 +177,15 @@ M0 verification:
 | D60 | S4 holds the `FeatureReader` (platform-wide) instead of `Providers`; the read goes through `resilience.Call` (breaker `online_features`) with half of S4's remaining budget; failure → declared defaults and trace reason `online_features:<reason>` | S4's budget is 15 ms (10 ms for image queries); scoring must keep time, and Redis trouble must never fail a search |
 | D61 | `seed` publishes demo vendors to `catalog.vendor.v1` with a documented score formula (DATA §4); `seed -events` shifts event timestamps so the simulator's `ref_date` lands on the current time | Exercises the real vendor path instead of writing Redis directly; the 7/30-day windows stay populated whenever the stack is seeded |
 | D62 | The ClickHouse Kafka table names the Compose broker (`redpanda:9092`), types `type` as an Enum in the Kafka table and skips up to 1000 broken messages per block; ISO timestamps parse with `best_effort` | A bad message is skipped instead of blocking the stream (a failing CAST in the view would block it). Integration tests substitute their broker; production needs its own broker setting (carried forward) |
+| D63 | CEL `item` and `query` are `map(string, dyn)` variables, with field names checked by walking the compiled AST; `item` is the ranking doc (extended with brand, stock, status, ship regions and filterable custom fields, read by every store's retrievers) plus `vendor` from the online features | cel-go native types caught typos too but could not hold `custom` and were no faster (~3.5 µs for the documented example rule pair); retrievers already read ranking fields, so rules need no extra round trip |
+| D64 | `internal/providers/policy` depends only on cel-go; `tenant.PolicyRule` aliases `policy.Rule` | Config validation (tenant) and S3 compile the same rules without an import cycle (pipeline imports tenant) |
+| D65 | S3 evaluates rules in parallel across CPUs, checks the deadline between chunks of 32, and fails open: a rule that errors keeps the candidate and adds nothing, candidates not evaluated in time pass unchanged; both are counted in the trace. When rules exist S3 reads the online features (for `item.vendor`) and S4 reuses them | A broken or slow rule must never empty results or fail a search; one Redis round trip per request |
+| D66 | Learned scorers: `{type, model}` names a platform scorer, `{type, model_id}` a tenant's registered model; `policy_boost` is added to a learned model's output instead of being an input; a scorer that cannot load or fails falls back to the stage's input order and is rebuilt after 30 s | Models are trained without tenant rules, so boosts must stay effective after retraining; a model outage must not 503 search |
+| D67 | Request log: search-api writes one record per served page to `search.requests.v1` → ClickHouse `search_requests` (180-day TTL); the simulator writes the same log for its sessions | Training needs each request's query, which impression events do not carry; real tenants' traffic gets the same training path |
+| D68 | The dataset is built by the Go serving code (`featurejob dataset`): each logged query is replayed through S1/S2 restricted to its impressed products, S4's feature builder runs, item features are aggregated as of the end of the training period, vendor features are current | No train/serve feature skew from a second implementation; no leakage of evaluation-period clicks into features. RRF ranks are within the restricted set (documented skew) |
+| D69 | Pre-rank is capped at 120 trees (200 took 7.4 ms for 2,000 candidates, over the 5 ms budget); learning rates are picked from a small grid by validation nDCG@10; the report evaluates all test requests and, separately, the randomized ones (unbiased) | Spec bound beats the tree cap; the test split is only used for reporting; logged clicks are position-biased |
+| D70 | Platform scorers live in the models bucket (`platform/<id>/model.onnx` + `features.json` with sha256); `featurejob publish` uploads them and writes Triton's `rank_gbdt_v1` (restart Triton to load); tenant uploads go to `tenants/<tid>/models/<upload>.onnx` and their sha256 is checked on every load | One artifact store for platform and tenant models; integrity checked end to end |
+| D71 | Services are built with cgo and ship ONNX Runtime in a distroless `cc` image; the runtime is initialized once per process; without it ONNX uploads are refused (503) and ONNX scorers fall back | onnxruntime_go loads the library with dlopen; ORT's environment is process-global by design |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
 
 ### Resolved questions (answered 2026-10-25)
@@ -429,17 +451,19 @@ New deps: none (`clickhouse-go/v2` moved into featurejob). Test image: `clickhou
 
 ---
 
-## M7 — Learned ranking and CEL policies
+## M7 — Learned ranking and CEL policies ✅
 
-**Done when:** nDCG@10 on the held-out set beats `default_linear`.
+**Done when:** nDCG@10 on the held-out set beats `default_linear`. **Met: `rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain); `prerank-gbdt-v1` 0.3348 vs 0.2563 (+0.0641 gain) on held-out test split (see §0).**
 
-- [ ] `tools/training`: ClickHouse dataset (graded labels order=3, cart=2, click=1), time split 80/10/10, LightGBM lambdarank prerank (≤ 15 features, ≤ 200 trees) and rank → ONNX via onnxmltools plus `.features.json`; metrics report
-- [ ] Feature builder for the catalog in `docs/MODELS.md` §4 (ordered schema, declared defaults)
-- [ ] `providers/scorer/onnx`: `onnxruntime_go`, one session per `(tenant, version)`, intra-op thread limit; ≤ 5 ms for 2000 candidates
-- [ ] `providers/scorer/kservev2`: remote rank through Triton's ONNX backend (`rank-gbdt-v1`)
-- [ ] ONNX upload flow: presign, ≤ 200 MB, sha256, dry-run against the declared schema
-- [ ] `providers/policy`: cel-go restricted env (`item`, `query`), compile at validation, `cel.CostLimit`, ≤ 50 rules / ≤ 2 KB; boosts clamped to [-1, 1] → `policy_boost`
-- [ ] Ranking eval: learned model vs `default_linear` on the held-out split
+- [x] `tools/training`: ClickHouse dataset (graded labels order=3, cart=2, click=1), time split 80/10/10, LightGBM lambdarank prerank (≤ 15 features, ≤ 200 trees) and rank → ONNX via onnxmltools plus `.features.json`; metrics report (**D67**–**D69**)
+- [x] Feature builder for the catalog in `docs/MODELS.md` §4 (ordered schema, declared defaults) (`internal/pipeline/feature/`)
+- [x] `providers/scorer/onnx`: `onnxruntime_go`, one session per `(tenant, version)`, intra-op thread limit; ≤ 5 ms for 2000 candidates (**D71**)
+- [x] `providers/scorer/kservev2`: remote rank through Triton's ONNX backend (`rank-gbdt-v1`)
+- [x] ONNX upload flow: presign, ≤ 200 MB, sha256, dry-run against the declared schema (`internal/controlplane/scorers.go`) (**D70**)
+- [x] `providers/policy`: cel-go restricted env (`item`, `query`), compile at validation, `cel.CostLimit`, ≤ 50 rules / ≤ 2 KB; boosts clamped to [-1, 1] → `policy_boost` (**D63**–**D66**)
+- [x] Ranking eval: learned model vs `default_linear` on the held-out split (`tools/eval/reports/2026-10-26_ranking.md`)
+
+Carried forward: exploration traffic slots served by search-api (impressions it emits are never `randomized`); the startup warm-up for search-api (from M4); ads and personalization (M8).
 
 ---
 

@@ -43,16 +43,17 @@ import (
 const service = "seed"
 
 type config struct {
-	LogLevel     string
-	MySQLDSN     string
-	KafkaBrokers []string
-	EventsTopic  string
-	S3Endpoint   string
-	S3Region     string
-	S3AccessKey  string
-	S3SecretKey  string
-	S3Bucket     string
-	S3PublicURL  string
+	LogLevel      string
+	MySQLDSN      string
+	KafkaBrokers  []string
+	EventsTopic   string
+	RequestsTopic string
+	S3Endpoint    string
+	S3Region      string
+	S3AccessKey   string
+	S3SecretKey   string
+	S3Bucket      string
+	S3PublicURL   string
 	// AdminEmail and AdminPassword bootstrap the first platform admin (PLAN.md R7).
 	AdminEmail    string
 	AdminPassword string
@@ -65,6 +66,7 @@ func loadConfig() (config, error) {
 		MySQLDSN:      env.Required("MYSQL_DSN"),
 		KafkaBrokers:  strings.Split(env.Required("KAFKA_BROKERS"), ","),
 		EventsTopic:   env.String("KAFKA_TOPIC_EVENTS", events.Topic),
+		RequestsTopic: env.String("KAFKA_TOPIC_REQUESTS", events.RequestTopic),
 		S3Endpoint:    env.Required("S3_ENDPOINT"),
 		S3Region:      env.String("S3_REGION", "us-east-1"),
 		S3AccessKey:   env.Required("S3_ACCESS_KEY"),
@@ -129,7 +131,7 @@ func run(ctx context.Context, o options) error {
 	}
 
 	if o.events {
-		return publishEvents(ctx, cfg.KafkaBrokers, cfg.EventsTopic, tid, o.dataDir, o.limit, log)
+		return publishEvents(ctx, cfg.KafkaBrokers, cfg.EventsTopic, cfg.RequestsTopic, tid, o.dataDir, o.limit, log)
 	}
 
 	products, err := readProducts(filepath.Join(o.dataDir, "products.canonical.jsonl"), o.limit)
@@ -464,10 +466,11 @@ func publishVendors(ctx context.Context, brokers []string, tid tenant.ID, path s
 	return nil
 }
 
-// publishEvents publishes the simulated interaction history (data/events) to the events topic.
-// Timestamps are shifted so the newest event lands at the current time, keeping the 7- and
-// 30-day feature windows populated whenever the stack is seeded.
-func publishEvents(ctx context.Context, brokers []string, topic string, tid tenant.ID, dataDir string, limit int, log *slog.Logger) error {
+// publishEvents publishes the simulated interaction history (data/events) to the events topic,
+// and its request log (data/events/requests.jsonl.gz) to the request topic. Timestamps are
+// shifted so the newest event lands at the current time, keeping the 7- and 30-day feature
+// windows populated whenever the stack is seeded.
+func publishEvents(ctx context.Context, brokers []string, topic, requestTopic string, tid tenant.ID, dataDir string, limit int, log *slog.Logger) error {
 	params, err := os.ReadFile(filepath.Join(dataDir, "simulation_params.json")) //nolint:gosec // operator-supplied dataset path
 	if err != nil {
 		return fmt.Errorf("%w (run `make data` first)", err)
@@ -494,8 +497,16 @@ func publishEvents(ctx context.Context, brokers []string, topic string, tid tena
 	defer cl.Close()
 	var produceErr atomic.Pointer[error]
 	start, total := time.Now(), 0
+	event := func(line []byte) (*kgo.Record, error) {
+		var e events.Event
+		if err := json.Unmarshal(line, &e); err != nil {
+			return nil, fmt.Errorf("decode event: %w", err)
+		}
+		e.TS = e.TS.Add(shift)
+		return events.Record(topic, tid, e)
+	}
 	for _, file := range files {
-		n, err := publishEventFile(ctx, cl, file, topic, tid, shift, limit-total, limit > 0, &produceErr)
+		n, err := publishFile(ctx, cl, file, event, limit-total, limit > 0, &produceErr)
 		total += n
 		if err != nil {
 			return err
@@ -505,18 +516,31 @@ func publishEvents(ctx context.Context, brokers []string, topic string, tid tena
 		}
 		log.Info("events progress", "file", filepath.Base(file), "published", total)
 	}
+	request := func(line []byte) (*kgo.Record, error) {
+		var r events.Request
+		if err := json.Unmarshal(line, &r); err != nil {
+			return nil, fmt.Errorf("decode request: %w", err)
+		}
+		r.TS = r.TS.Add(shift)
+		return events.RequestRecord(requestTopic, tid, r)
+	}
+	requests, err := publishFile(ctx, cl, filepath.Join(dataDir, "events", "requests.jsonl.gz"), request, 0, false, &produceErr)
+	if err != nil {
+		return err
+	}
 	if err := cl.Flush(ctx); err != nil {
 		return fmt.Errorf("flush events: %w", err)
 	}
 	if p := produceErr.Load(); p != nil {
 		return fmt.Errorf("produce events: %w", *p)
 	}
-	log.Info("interaction events published", "tenant", tid, "topic", topic, "events", total,
+	log.Info("interaction events published", "tenant", tid, "topic", topic, "events", total, "requests", requests,
 		"shift", shift.Round(time.Hour).String(), "took", time.Since(start).Round(time.Millisecond).String())
 	return nil
 }
 
-func publishEventFile(ctx context.Context, cl *kgo.Client, file, topic string, tid tenant.ID, shift time.Duration,
+// publishFile produces one record per line of a gzipped JSONL file, encoded by encode.
+func publishFile(ctx context.Context, cl *kgo.Client, file string, encode func([]byte) (*kgo.Record, error),
 	remaining int, limited bool, produceErr *atomic.Pointer[error]) (int, error) {
 	f, err := os.Open(file) //nolint:gosec // operator-supplied dataset path
 	if err != nil {
@@ -532,14 +556,9 @@ func publishEventFile(ctx context.Context, cl *kgo.Client, file, topic string, t
 	sc.Buffer(make([]byte, 1<<20), 1<<20)
 	n := 0
 	for sc.Scan() && (!limited || n < remaining) {
-		var e events.Event
-		if err := json.Unmarshal(sc.Bytes(), &e); err != nil {
-			return n, fmt.Errorf("%s line %d: %w", file, n+1, err)
-		}
-		e.TS = e.TS.Add(shift)
-		r, err := events.Record(topic, tid, e)
+		r, err := encode(sc.Bytes())
 		if err != nil {
-			return n, err
+			return n, fmt.Errorf("%s line %d: %w", file, n+1, err)
 		}
 		cl.Produce(ctx, r, func(_ *kgo.Record, err error) {
 			if err != nil {

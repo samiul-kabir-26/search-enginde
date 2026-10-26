@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/providers/vectorstore"
 )
 
 // sourceFields are the display fields read by Docs (one page at a time).
@@ -25,9 +27,25 @@ var sourceFields = []string{
 	"category_ids", "rating", "rating_count", "listing_completeness", "created_at",
 }
 
-// rankFields are read as doc values by Search: everything ranking needs, without loading
-// _source for hundreds of hits (3–5x faster). Display fields are hydrated per page via Docs.
-var rankFields = []string{"vendor_id", "price_minor", "category_ids", "rating", "rating_count", "listing_completeness", "created_at"}
+// rankFields are read as doc values by Search: everything ranking and CEL policies need,
+// without loading _source for hundreds of hits (3–5x faster). Display fields are hydrated per
+// page via Docs. Filterable custom fields are added per tenant (rankingFields).
+var rankFields = []string{"vendor_id", "brand", "price_minor", "category_ids", "rating", "rating_count",
+	"listing_completeness", "created_at", "stock", "status", "ship_regions"}
+
+// rankingFields are rankFields plus the tenant's filterable custom fields, and which of them
+// are lists.
+func (s *Store) rankingFields() ([]string, map[string]bool) {
+	fields := slices.Clone(rankFields)
+	lists := map[string]bool{"category_ids": true, "ship_regions": true}
+	for _, c := range vectorstore.CustomRankingFields(s.registry) {
+		fields = append(fields, c)
+		if f, ok := s.registry.Field(c); ok && f.Type == catalog.TypeKeywordArray {
+			lists[c] = true
+		}
+	}
+	return fields, lists
+}
 
 // totalHitsCap bounds exact total counting; totals above it are reported as the cap.
 const totalHitsCap = 10000
@@ -45,12 +63,13 @@ func (s *Store) Search(ctx context.Context, req pipeline.LexicalSearch) (pipelin
 		return pipeline.LexicalResult{}, fmt.Errorf("search %s: %w", s.target, err)
 	}
 	out := pipeline.LexicalResult{TotalMatches: resp.Hits.Total.Value, Facets: map[string][]pipeline.FacetValue{}}
+	_, lists := s.rankingFields()
 	for _, h := range resp.Hits.Hits {
 		score := h.Score
 		if req.Popular && len(h.Sort) > 0 {
 			score = float64(len(resp.Hits.Hits) - len(out.Hits))
 		}
-		out.Hits = append(out.Hits, pipeline.Hit{ProductID: h.ID, Score: score, Doc: h.Fields.doc()})
+		out.Hits = append(out.Hits, pipeline.Hit{ProductID: h.ID, Score: score, Doc: h.Fields.doc(lists)})
 	}
 	for _, f := range req.Facets {
 		agg, ok := resp.Aggregations[aggName(f.Field)]
@@ -71,7 +90,8 @@ func (s *Store) searchBody(req pipeline.LexicalSearch) ([]byte, error) {
 	if base != nil {
 		bq["filter"] = []any{base}
 	}
-	body := map[string]any{"size": req.K, "_source": false, "docvalue_fields": rankFields, "track_total_hits": totalHitsCap}
+	fields, _ := s.rankingFields()
+	body := map[string]any{"size": req.K, "_source": false, "docvalue_fields": fields, "track_total_hits": totalHitsCap}
 	switch {
 	case req.Popular:
 		bq["must"] = []any{map[string]any{"match_all": map[string]any{}}}
@@ -273,40 +293,22 @@ func (d sourceDoc) doc() *pipeline.Doc {
 }
 
 // docValueDoc is the `fields` section of a hit: every doc value comes back as an array.
-type docValueDoc struct {
-	VendorID            []string  `json:"vendor_id"`
-	PriceMinor          []int64   `json:"price_minor"`
-	CategoryIDs         []string  `json:"category_ids"`
-	Rating              []float64 `json:"rating"`
-	RatingCount         []int64   `json:"rating_count"`
-	ListingCompleteness []float64 `json:"listing_completeness"`
-	CreatedAt           []string  `json:"created_at"`
-}
+type docValueDoc map[string][]any
 
-func (d docValueDoc) doc() *pipeline.Doc {
-	out := &pipeline.Doc{CategoryIDs: d.CategoryIDs}
-	if len(d.VendorID) > 0 {
-		out.VendorID = d.VendorID[0]
-	}
-	if len(d.PriceMinor) > 0 {
-		out.PriceMinor = d.PriceMinor[0]
-	}
-	if len(d.Rating) > 0 {
-		r := d.Rating[0]
-		out.Rating = &r
-	}
-	if len(d.RatingCount) > 0 {
-		out.RatingCount = d.RatingCount[0]
-	}
-	if len(d.ListingCompleteness) > 0 {
-		out.ListingCompleteness = d.ListingCompleteness[0]
-	}
-	if len(d.CreatedAt) > 0 {
-		if t, err := time.Parse(time.RFC3339Nano, d.CreatedAt[0]); err == nil {
-			out.CreatedAt = &t
+// doc converts doc values to the ranking doc: list fields keep their arrays, others take the
+// first value.
+func (d docValueDoc) doc(lists map[string]bool) *pipeline.Doc {
+	m := make(map[string]any, len(d))
+	for k, vs := range d {
+		switch {
+		case lists[k]:
+			m[k] = vs
+		case len(vs) > 0:
+			m[k] = vs[0]
 		}
 	}
-	return out
+	_, doc := vectorstore.DocFromMap(m)
+	return doc
 }
 
 // Docs fetches stored product data by ID through the alias.

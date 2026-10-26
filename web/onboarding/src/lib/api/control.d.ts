@@ -654,7 +654,7 @@ export interface paths {
         /** List registered models */
         get: operations["listModels"];
         put?: never;
-        /** Register a remote embedder (ONNX artifacts arrive in M7) */
+        /** Register an embedder or a learned scorer (an uploaded ONNX model or a remote kserve_v2 model) */
         post: operations["registerModel"];
         delete?: never;
         options?: never;
@@ -671,7 +671,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Presigned S3 PUT for an ONNX artifact (served from M7) */
+        /**
+         * Presigned S3 PUT (15 minutes) for an ONNX scorer model of at most 200 MB
+         * @description Requires a plan with BYO providers. Upload the file, then POST /models with type onnx and the upload_id.
+         */
         post: operations["createModelUpload"];
         delete?: never;
         options?: never;
@@ -1243,31 +1246,48 @@ export interface components {
             latency_ms?: number;
         };
         /**
-         * @description A remote embedder. kserve_v2 models follow docs/MODELS.md §1 (INPUT_TEXT or INPUT_IMAGE BYTES [N] in,
-         *     EMBEDDING FP32 [N, D] out, L2-normalized); name and version are the KServe model name and version. For
-         *     openai_embeddings, name is the `model` field of POST {endpoint}/v1/embeddings (text only). Prerank, rank
-         *     and rerank models and ONNX artifacts arrive with learned ranking (M7).
+         * @description An embedder or a learned scorer.
+         *
+         *     Embedders (kind embedder): kserve_v2 models follow docs/MODELS.md §1 (INPUT_TEXT or INPUT_IMAGE BYTES [N]
+         *     in, EMBEDDING FP32 [N, D] out, L2-normalized); name and version are the KServe model name and version. For
+         *     openai_embeddings, name is the `model` field of POST {endpoint}/v1/embeddings (text only). They need
+         *     endpoint, input_schema.modality and output_schema.dim.
+         *
+         *     Scorers (kind prerank or rank): FEATURES FP32 [N, F] in, SCORES FP32 [N] out, with
+         *     input_schema.features naming the F features in input order (catalog features of docs/MODELS.md §4, no
+         *     user features; policy_boost is added to the model's output unless listed). An onnx scorer takes the
+         *     upload_id of POST /models/uploads: it is checked (≤ 200 MB, sha256 recorded) and dry-run on the declared
+         *     defaults now, and is `validated` on success. A kserve_v2 scorer takes an endpoint and is validated by
+         *     POST /models/{id}/validate. Rerank models arrive with personalization (M8).
          */
         ModelInput: {
             /** @enum {string} */
-            kind: "embedder";
+            kind: "embedder" | "prerank" | "rank";
             /** @enum {string} */
-            type: "kserve_v2" | "openai_embeddings";
+            type: "kserve_v2" | "openai_embeddings" | "onnx";
+            /** @description onnx scorers only; from POST /models/uploads */
+            upload_id?: string;
             name: string;
             version: string;
             /** Format: uri */
-            endpoint: string;
+            endpoint?: string;
             /** @description Sent as a bearer token */
             secret_ref?: string;
             /** @description An image model whose text tower (INPUT_TEXT) embeds into the same space */
             supports_text_to_image?: boolean;
             max_batch_size?: number;
             input_schema: {
-                /** @enum {string} */
-                modality: "text" | "image";
+                /**
+                 * @description Embedders
+                 * @enum {string}
+                 */
+                modality?: "text" | "image";
+                /** @description Scorers; the model's ordered input features */
+                features?: string[];
             };
-            output_schema: {
-                dim: number;
+            output_schema?: {
+                /** @description Embedders */
+                dim?: number;
             };
         };
         Model: {
@@ -1287,10 +1307,13 @@ export interface components {
             transport?: "grpc" | "rest";
             input_schema?: {
                 modality?: string;
+                features?: string[];
             };
             output_schema?: {
                 dim?: number;
             };
+            /** @description onnx scorers */
+            artifact_sha256?: string;
             /** @enum {string} */
             status: "registered" | "validated" | "failed";
             /** Format: date-time */
@@ -1299,19 +1322,25 @@ export interface components {
             /** Format: date-time */
             created_at?: string;
         };
-        /** @description Probe inferences: text (two texts), image (a small JPEG) and text_to_image as the modality calls for; each output must be [N, dim] and L2-normalized. The result becomes the model status. */
+        /** @description Embedders: probe inferences (two texts, a small JPEG, the text tower) as the modality calls for; each output must be [N, dim] and L2-normalized. Scorers: an onnx model is re-checked against its recorded sha256 and dry-run; a kserve_v2 model scores two rows of declared defaults over gRPC, then REST, and must return 2 finite scores. The result becomes the model status. */
         ModelValidation: {
             ok: boolean;
             checks: components["schemas"]["ProbeCheck"][];
             latency_ms?: number;
         };
+        /** @description An embedder (modality, dim) or a learned scorer (type, features; available once trained by make train). */
         PlatformModel: {
             id: string;
-            kind: string;
             /** @enum {string} */
-            modality: "text" | "image";
-            dim: number;
+            kind: "embedder" | "scorer";
+            /** @enum {string} */
+            type?: "onnx" | "kserve_v2";
+            /** @enum {string} */
+            modality?: "text" | "image";
+            dim?: number;
             supports_text_to_image?: boolean;
+            available: boolean;
+            features?: string[];
             description?: string;
         };
         UploadRequest: {
@@ -1492,7 +1521,7 @@ export interface components {
         };
         RankingStep: {
             /**
-             * @description learned and byo return not_available until M7
+             * @description default: default_linear (weights tune the rank stage). learned: the platform models prerank-gbdt-v1 (in-process ONNX) and rank-gbdt-v1 (Triton), not_available until trained. byo: the tenant's registered scorer models (prerank_model_id and/or rank_model_id; the other stage keeps default_linear).
              * @default default
              * @enum {string}
              */
@@ -1500,6 +1529,8 @@ export interface components {
             weights?: {
                 [key: string]: number;
             };
+            prerank_model_id?: string;
+            rank_model_id?: string;
         };
         PersonalizationStep: {
             personalization?: {
@@ -2773,7 +2804,10 @@ export interface operations {
     createModelUpload: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Stored for 24 h. */
+                "Idempotency-Key"?: components["parameters"]["IdempotencyKey"];
+            };
             path: {
                 tid: string;
             };
@@ -2781,7 +2815,13 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UploadRequest"];
+                "application/json": {
+                    /**
+                     * @default onnx
+                     * @enum {string}
+                     */
+                    format?: "onnx";
+                };
             };
         };
         responses: {

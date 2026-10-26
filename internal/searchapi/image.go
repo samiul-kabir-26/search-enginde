@@ -233,6 +233,6 @@ func (s *Service) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp.RequestID = ulid.Make().String()
-	s.emitImpressions(p.Tenant, resp, pipeline.UserContext{})
+	s.emitServed(p.Tenant, resp, q)
 	platform.WriteJSON(w, http.StatusOK, resp)
 }

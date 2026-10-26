@@ -140,18 +140,20 @@ Each retriever gets `k` from config (default 500, max 2000).
 - Pushdown filters (request facets plus the tenant's always-on filters, such as `status = active` and `stock > 0`) are applied inside S2.
 - CEL `filter` rules run here on candidate payloads.
 - CEL `boost` rules add bounded score modifiers. Boosts are clamped to `[-1, 1]` and applied in S5 as a feature, `policy_boost`.
+- The rules are compiled once per (tenant, config version) by the registry. When a config has rules, S3 reads the request's online features (for `item.vendor`; S4 then reuses them) and evaluates every candidate in parallel across the CPUs, checking the stage deadline between chunks of 32. Candidates not evaluated in time, and rules that fail on a candidate, leave it unchanged; both are reported as `cel:timeout(n unevaluated)` and `cel:errors(n)`. Without rules S3 does nothing.
+- Retrievers read the fields rules need with the ranking fields (doc values in OpenSearch, a trimmed payload in vector stores): brand, stock, status, ship regions and filterable custom fields.
 
 ### S4 Pre-rank
 
-- An in-process ONNX scorer, or `default_linear` if none is configured.
+- An in-process ONNX scorer (the platform's `prerank-gbdt-v1` or a tenant's upload), or `default_linear`. A learned model gets its declared features in order (`FeatureSchema.Matrix`, declared defaults for missing values) and `policy_boost` is added to its output.
 - Features come from the candidate payload, retrieval scores and Redis online features, normalized per request: `rrf_score` and `bm25_norm` divide by the request maximum, cosines are used as returned, counts and prices are log-scaled.
 - Online features (item, vendor and user, `docs/MODELS.md` §4) are read once per request through `resilience.Call` (breaker `online_features`) with at most half of S4's remaining budget, so scoring always has time left. A failure or timeout leaves the declared defaults and is reported as `online_features:<reason>` in the trace; the search never fails for it. User features are carried to S6 on the candidates.
 - Keeps the top `prerank.keep` (default 300). Candidates that are cut stay behind in RRF order, and those cut by S5 stay in pre-rank order, so deep pages (up to the plan's page depth) follow pre-rank and then RRF order.
 
 ### S5 Rank
 
-- Uses a remote KServe v2 scorer, the in-process ONNX scorer, or `default_linear`.
-- Candidates are sent in one batched call.
+- Uses a remote KServe v2 scorer (the platform's `rank-gbdt-v1` in Triton, or a tenant's endpoint), the in-process ONNX scorer, or `default_linear`.
+- Candidates are sent in one batched call. A scorer that fails, times out or cannot be loaded leaves the pre-rank order (`resilience.Call` fallback); search never fails for it.
 - Keeps the top `rank.keep` (default 100).
 
 ### S6 Re-rank and blend
@@ -209,9 +211,9 @@ Each retriever gets `k` from config (default 500, max 2000).
 - Secrets are never returned by any API and never logged: values travel as `security.Secret`, which prints, logs and marshals as `[redacted]`.
 
 **CEL.**
-- Uses the restricted environment from `docs/TENANT_CONFIG.md` §5.
-- Programs are compiled at config validation.
-- Runtime cost limit is set with `cel.CostLimit`, and expression size is bounded.
+- Uses the restricted environment from `docs/TENANT_CONFIG.md` §5 rule 7: two map variables, the standard library only, field names checked against the item and query schemas.
+- Programs are compiled at config validation and again (once per config version) by the registry.
+- The estimated cost is bounded at compile time and `cel.CostLimit` cuts off each evaluation; expressions are at most 2 KB and 50 per tenant.
 
 **Image uploads.**
 - Maximum 10 MB; accepted formats are JPEG, PNG and WebP, detected by magic bytes.
@@ -221,9 +223,10 @@ Each retriever gets `k` from config (default 500, max 2000).
 **Explain trace.** Allowed only for tokens with the `search:debug` scope.
 
 **ONNX uploads.**
-- Maximum 200 MB; the SHA-256 is recorded.
-- Loaded in a session with intra-op threads limited and one session per `(tenant, version)`.
-- Validated against the declared feature schema with a dry-run inference at registration.
+- Maximum 200 MB, through a 15-minute presigned PUT into the models bucket; the SHA-256 is recorded and checked again whenever search-api loads the model.
+- Loaded in a session with intra-op threads limited (`ONNX_INTRA_OP_THREADS`, default 1) and one session per `(tenant, version)`.
+- Validated against the declared feature schema with a dry-run inference at registration: one `FEATURES` FP32 `[N, F]` input of the declared width, a `SCORES` output, finite scores for the declared defaults.
+- The services are built with cgo and ship ONNX Runtime (`deploy/Dockerfile`, distroless `cc` image); without the library, uploads are refused and ONNX scorers fall back.
 
 ## 10. Observability
 

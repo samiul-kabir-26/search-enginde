@@ -8,6 +8,7 @@ import (
 
 	"github.com/zavisoft/search-engine/internal/catalog"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
+	"github.com/zavisoft/search-engine/internal/providers/policy"
 )
 
 // CurrentSchemaVersion is the config document schema this build reads and writes.
@@ -88,6 +89,15 @@ type CatalogConfig struct {
 	FieldMapping  catalog.FieldMapping  `json:"field_mapping"`
 	CustomFields  []catalog.CustomField `json:"custom_fields,omitempty"`
 	VendorMapping catalog.VendorMapping `json:"vendor_mapping,omitempty"`
+}
+
+// CustomFieldNames returns the custom field names (without the `custom.` prefix).
+func (c CatalogConfig) CustomFieldNames() []string {
+	names := make([]string, len(c.CustomFields))
+	for i, f := range c.CustomFields {
+		names[i] = f.Name
+	}
+	return names
 }
 
 // QueryConfig is the optional `query` section: tenant additions to the S1 attribute
@@ -187,12 +197,8 @@ type PolicyConfig struct {
 	Rules         []PolicyRule  `json:"rules"`
 }
 
-// PolicyRule is a CEL filter or boost rule (evaluated from M7).
-type PolicyRule struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Expr string `json:"expr"`
-}
+// PolicyRule is a CEL filter or boost rule, evaluated in S3 (internal/providers/policy).
+type PolicyRule = policy.Rule
 
 // Scorer types.
 const (
@@ -201,9 +207,12 @@ const (
 	ScorerKServeV2      = "kserve_v2"
 )
 
-// ScorerConfig selects a scorer.
+// ScorerConfig selects a scorer: default_linear with weights, or a learned onnx or kserve_v2
+// model, either a platform model (Model, e.g. prerank-gbdt-v1) or a tenant's registered model
+// (ModelID).
 type ScorerConfig struct {
 	Type    string             `json:"type"`
+	Model   string             `json:"model,omitempty"`
 	ModelID string             `json:"model_id,omitempty"`
 	Weights map[string]float64 `json:"weights,omitempty"`
 }

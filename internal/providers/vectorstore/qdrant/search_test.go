@@ -61,7 +61,7 @@ func TestPayloadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, d := docFromPayload(vm, vectorstore.Spec{})
+	id, d := docFromPayload(vm, vectorstore.Spec{}, nil)
 	if id != "abo:1" || d.Title != "Bag" || d.PriceMinor != 999 || d.RatingCount != 12 || d.ImageCount != 2 ||
 		d.ImageURL != "http://a" || *d.Rating != 4.2 || !d.CreatedAt.Equal(created) || d.CategoryIDs[0] != "bags" {
 		t.Errorf("round trip lost data: %s %+v", id, d)

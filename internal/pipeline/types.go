@@ -95,6 +95,12 @@ type Doc struct {
 	ListingCompleteness float64    `json:"listing_completeness,omitempty"`
 	ImageCount          int        `json:"image_count,omitempty"`
 	CreatedAt           *time.Time `json:"created_at,omitempty"`
+	// Stock, Status, ShipRegions and Custom (filterable custom fields, keyed without the
+	// `custom.` prefix) are read for CEL policies.
+	Stock       *int64         `json:"stock,omitempty"`
+	Status      string         `json:"status,omitempty"`
+	ShipRegions []string       `json:"ship_regions,omitempty"`
+	Custom      map[string]any `json:"custom,omitempty"`
 }
 
 // Hit is one retriever result: a raw retriever score (BM25 or cosine) and the stored doc.
@@ -123,4 +129,6 @@ type Candidate struct {
 	// positions past rank.keep keep their pre-rank or RRF order.
 	Stage     string
 	Sponsored bool
+	// PolicyBoost is the sum of the tenant's CEL boost rules, clamped to [-1, 1] (S3).
+	PolicyBoost float64
 }

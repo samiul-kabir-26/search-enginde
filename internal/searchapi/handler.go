@@ -358,7 +358,7 @@ func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.
 		resp.Trace = tr
 	}
 	if !playground {
-		s.emitImpressions(p.Tenant, resp, q.User)
+		s.emitServed(p.Tenant, resp, q)
 	}
 	return resp, true
 }

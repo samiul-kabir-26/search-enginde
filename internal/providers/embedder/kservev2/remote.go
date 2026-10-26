@@ -49,43 +49,72 @@ type Remote struct {
 
 // NewRemote returns an embedder for a tenant endpoint. Nothing is dialed until the first call.
 func NewRemote(r Remote, cfg Config) (*Embedder, error) {
-	u, err := url.Parse(r.Endpoint)
-	if err != nil || u.Hostname() == "" {
-		return nil, fmt.Errorf("kserve endpoint %q is not a URL", r.Endpoint)
-	}
-	if u.Scheme != "https" && !r.Plaintext {
-		return nil, fmt.Errorf("kserve endpoint %q must be https", r.Endpoint)
+	base, err := r.Base()
+	if err != nil {
+		return nil, err
 	}
 	switch r.Transport {
 	case TransportREST:
 		if r.HTTP == nil {
 			return nil, fmt.Errorf("kserve REST transport needs an HTTP client")
 		}
-		return newEmbedder(&restTransport{base: strings.TrimSuffix(u.String(), "/"), client: r.HTTP, token: r.Token}, cfg, nil, r.Name)
+		return newEmbedder(&restTransport{base: base, client: r.HTTP, token: r.Token}, cfg, nil, r.Name)
 	case "", TransportGRPC:
-		port := u.Port()
-		if port == "" {
-			port = "443"
-			if u.Scheme == "http" {
-				port = "80"
-			}
-		}
-		creds := insecure.NewCredentials()
-		if u.Scheme == "https" {
-			creds = credentials.NewTLS(&tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12})
-		}
-		conn, err := grpc.NewClient("passthrough:///"+net.JoinHostPort(u.Hostname(), port),
-			grpc.WithTransportCredentials(creds), grpc.WithContextDialer(r.Dial))
+		conn, err := r.GRPCConn()
 		if err != nil {
-			return nil, fmt.Errorf("kserve client: %w", err)
+			return nil, err
 		}
-		t := &grpcTransport{client: inference.NewGRPCInferenceServiceClient(conn)}
-		if r.Token != "" {
-			t.md = metadata.Pairs("authorization", "Bearer "+r.Token)
-		}
+		t := &grpcTransport{client: inference.NewGRPCInferenceServiceClient(conn), md: r.Metadata()}
 		return newEmbedder(t, cfg, conn, r.Name)
 	}
 	return nil, fmt.Errorf("kserve transport %q is not grpc or rest", r.Transport)
+}
+
+// Base checks the endpoint (a URL, https unless Plaintext) and returns it without a trailing
+// slash: the REST base URL.
+func (r Remote) Base() (string, error) {
+	u, err := url.Parse(r.Endpoint)
+	if err != nil || u.Hostname() == "" {
+		return "", fmt.Errorf("kserve endpoint %q is not a URL", r.Endpoint)
+	}
+	if u.Scheme != "https" && !r.Plaintext {
+		return "", fmt.Errorf("kserve endpoint %q must be https", r.Endpoint)
+	}
+	return strings.TrimSuffix(u.String(), "/"), nil
+}
+
+// GRPCConn returns a gRPC client for the endpoint's host and port (TLS for https), dialed
+// through the egress dialer. Nothing is dialed until the first call.
+func (r Remote) GRPCConn() (*grpc.ClientConn, error) {
+	if _, err := r.Base(); err != nil {
+		return nil, err
+	}
+	u, _ := url.Parse(r.Endpoint)
+	port := u.Port()
+	if port == "" {
+		port = "443"
+		if u.Scheme == "http" {
+			port = "80"
+		}
+	}
+	creds := insecure.NewCredentials()
+	if u.Scheme == "https" {
+		creds = credentials.NewTLS(&tls.Config{ServerName: u.Hostname(), MinVersion: tls.VersionTLS12})
+	}
+	conn, err := grpc.NewClient("passthrough:///"+net.JoinHostPort(u.Hostname(), port),
+		grpc.WithTransportCredentials(creds), grpc.WithContextDialer(r.Dial))
+	if err != nil {
+		return nil, fmt.Errorf("kserve client: %w", err)
+	}
+	return conn, nil
+}
+
+// Metadata is the gRPC metadata sent with every call: the bearer token, if any.
+func (r Remote) Metadata() metadata.MD {
+	if r.Token == "" {
+		return nil
+	}
+	return metadata.Pairs("authorization", "Bearer "+r.Token)
 }
 
 // restTransport speaks the KServe v2 REST protocol: text as JSON BYTES strings, images with the

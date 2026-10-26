@@ -36,6 +36,9 @@ type State struct {
 	Facets     map[string][]FacetValue
 	// TotalMatches is the approximate lexical match count.
 	TotalMatches int64
+	// Online holds the request's online features once read (by S3 when policies need vendor
+	// data, else by S4); it is set, possibly empty, after the first attempt.
+	Online *OnlineFeatures
 	// Degraded is set when retrieval returned nothing because every retriever failed, or a
 	// stage could not run; the response is still 200.
 	Degraded bool

@@ -45,6 +45,18 @@ const (
 	UserPriceBandMatch   = "user_price_band_match"
 )
 
+// Names lists every catalog feature in docs/MODELS.md §4 order, the column order of training
+// datasets.
+func Names() []string {
+	return []string{
+		RRFScore, BM25Norm, CosineText, CosineImage, RetrieverCount, PolicyBoost,
+		PriceMinorLog, Rating, RatingCountLog, ListingCompleteness, ImageCount, AgeDays,
+		CTR7d, CTR30d, CVR7d, CVR30d, Orders30dLog,
+		VendorScore, VendorOnTimeDispatch, VendorDisputeRate, VendorResponseHours, VendorVerified,
+		QueryCategoryMatch, UserCategoryAffinity, UserPriceBandMatch,
+	}
+}
+
 // Catalog maps every known feature to its source. User features are only available in S6.
 func Catalog() map[string]Source {
 	return map[string]Source{

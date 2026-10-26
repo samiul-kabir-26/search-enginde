@@ -27,8 +27,9 @@ const (
 type EventSink interface {
 	// Produce writes evs and waits for the acknowledgement.
 	Produce(ctx context.Context, tid tenant.ID, evs []events.Event) error
-	// Emit queues evs without waiting; failures drop them.
-	Emit(tid tenant.ID, evs []events.Event)
+	// Emit queues a served page's request record and impressions without waiting; failures
+	// drop them.
+	Emit(tid tenant.ID, req events.Request, evs []events.Event)
 }
 
 // VendorStore applies partial vendor feature updates.
@@ -124,13 +125,18 @@ func (s *Service) handleVendors(w http.ResponseWriter, r *http.Request) {
 	platform.WriteJSON(w, http.StatusOK, VendorsResponse{Updated: len(req.Vendors)})
 }
 
-// emitImpressions queues one impression per returned result (docs/ARCHITECTURE.md §2). Tenants
-// send clicks, carts and orders that reference resp.RequestID.
-func (s *Service) emitImpressions(tid tenant.ID, resp *SearchResponse, u pipeline.UserContext) {
-	if s.Events == nil || len(resp.Results) == 0 {
+// emitServed queues the page's request record (the request log training joins with
+// impressions) and one impression per returned result (docs/ARCHITECTURE.md §2). Tenants send
+// clicks, carts and orders that reference resp.RequestID.
+func (s *Service) emitServed(tid tenant.ID, resp *SearchResponse, q *pipeline.Query) {
+	if s.Events == nil {
 		return
 	}
-	now := time.Now().UTC()
+	now, u := time.Now().UTC(), q.User
+	req := events.Request{
+		RequestID: resp.RequestID, TS: now, Type: string(q.Type), Query: q.Raw, AnchorID: q.AnchorID,
+		UserID: u.ID, SessionID: u.SessionID, ConfigVersion: resp.ConfigVersion, PageOffset: resp.Offset, Results: len(resp.Results),
+	}
 	evs := make([]events.Event, len(resp.Results))
 	for i, r := range resp.Results {
 		evs[i] = events.Event{
@@ -138,5 +144,5 @@ func (s *Service) emitImpressions(tid tenant.ID, resp *SearchResponse, u pipelin
 			ProductID: r.ProductID, Position: r.Position, UserID: u.ID, SessionID: u.SessionID, Sponsored: r.Sponsored,
 		}
 	}
-	s.Events.Emit(tid, evs)
+	s.Events.Emit(tid, req, evs)
 }

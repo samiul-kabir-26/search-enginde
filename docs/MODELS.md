@@ -30,8 +30,10 @@ Preprocessing (tokenization, image resize and normalization) is the model server
 |---|---|---|---|
 | `clip-vit-b32` | `laion/CLIP-ViT-B-32-laion2B-s34B-b79K` (Hugging Face, MIT) | 512 | Image embeddings, plus text→image via the text tower |
 | `bge-small-en-v1.5` | `BAAI/bge-small-en-v1.5` (Hugging Face, MIT) | 384 | Text semantic retrieval (CLS pooling, normalized) |
-| `prerank-gbdt-v1` | Trained in M7 | n/a | In-process ONNX |
-| `rank-gbdt-v1` | Trained in M7 | n/a | Triton ONNX backend |
+| `prerank-gbdt-v1` | LightGBM lambdarank (`make train`, §5) | n/a | Pre-rank, in-process ONNX (`{"type": "onnx", "model": "prerank-gbdt-v1"}`) |
+| `rank-gbdt-v1` | LightGBM lambdarank (`make train`, §5) | n/a | Rank, Triton ONNX backend as `rank_gbdt_v1` (`{"type": "kserve_v2", "model": "rank-gbdt-v1"}`) |
+
+The learned scorers are published to the models bucket as `platform/<id>/model.onnx` plus `platform/<id>/features.json` (the ordered feature schema, sha256 and metrics), and `rank_gbdt_v1` is written into the Triton model repository (restart Triton to load a new version). `GET /v1/platform/models` lists them with `available: false` until trained; config validation and the onboarding `learned` mode refuse them until then.
 
 Verify each model's license before shipping it as a platform default to tenants.
 
@@ -85,11 +87,29 @@ Features are normalized per request to keep linear weights comparable: `rrf_scor
 
 ## 5. Training (`tools/training`)
 
-**Pre-rank and rank models**
-- **Data.** Labels come from ClickHouse: impression rows joined with click, cart and order events, with graded relevance `order=3`, `add_to_cart=2`, `click=1`, otherwise 0.
-- **Algorithm.** LightGBM with `objective=lambdarank`, grouped by `request_id`.
-- **Split.** By time: 80/10/10.
-- **Export.** To ONNX via `onnxmltools`, with the feature list written to `<model>.features.json`.
-- **Metrics.** nDCG@10 and MRR on the test split, written to `tools/eval/reports/`.
+`make train TENANT=demo` runs the three steps below and then `featurejob publish`.
 
-**Pre-rank specifically.** At most 15 features (cheap ones only) and at most 200 trees, so inference stays at or under 5 ms for 2000 candidates in-process.
+**Dataset** (`featurejob dataset`, Go). Training features must be the ones the serving pipeline computes, so the dataset is built by the serving code itself:
+- **Requests.** search-api logs every served page (`search.requests.v1` → ClickHouse `search_requests`: request ID, type, query, user, config version); `seed -events` publishes the simulator's request log the same way. The builder takes the window's text requests with at least one click, cart or order, in time order, evenly sampled to `-max-requests` (default 20,000).
+- **Labels.** Each request's impressions joined with its click, cart and order events: graded `order=3`, `add_to_cart=2`, `click=1`, otherwise 0. A `randomized` column marks requests shown in a randomized order.
+- **Split.** By time: the first 80% of requests train, the next 10% validate, the last 10% test.
+- **Features.** Each query is replayed through S1 and S2 of the tenant's active config with a filter restricted to the request's impressed products, then S4's feature builder computes the request-local features (`age_days` relative to the request time) and the online features are added. Item features (CTR, CVR, orders) are aggregated by the feature job **as of the end of the training period**, so no feature sees the period it is evaluated on; vendor features are the tenant's current values. Retrieval ranks inside the restricted set differ slightly from a full query's (RRF and `bm25_norm` are normalized within the request), a skew the models tolerate because they learn relative orderings.
+- **Output.** CSV: identifiers, label, `randomized`, the `default_linear` scores of the config (the baseline), then every non-user catalog feature in §4 order, missing values at their declared defaults (exactly what `FeatureSchema.Matrix` sends a model).
+
+**Training** (`tools/training/train.py`, Python).
+- **Algorithm.** LightGBM `objective=lambdarank` grouped by request, nDCG@10 truncation 20, early stopping on validation nDCG@10 (patience 50), deterministic with a fixed seed.
+- **Pre-rank.** 15 cheap features (retrieval scores, payload, `query_category_match`, `ctr_7d`, `cvr_7d`, `vendor_score`), at most **120 trees** of 15 leaves: 200 trees took 7.4 ms for 2,000 candidates on one thread, over the 5 ms budget, while 120 take ~4.3 ms. The learning rate is chosen from {0.05, 0.1, 0.15, 0.2} by validation nDCG@10.
+- **Rank.** All 22 non-user features except `policy_boost`, up to 500 trees of 31 leaves, learning rate from {0.05, 0.1} by validation nDCG@10.
+- **`policy_boost`** is never a model input: tenant rules change without retraining, so serving adds it to a learned model's output (§1 scorer contract, `FeatureSchema.WithPolicyBoost`). User features stay re-rank only.
+- **Export.** `onnxmltools` (opset 15) with the output reshaped to `SCORES [N]`; ONNX Runtime must match LightGBM within 1e-4 on test rows. Each model gets `features.json`.
+- **Metrics.** nDCG@10 and MRR of each ranker re-ranking the test requests' logged impressions: the logged order, `default_linear` (pre-rank and rank) and both learned models, with a 95% bootstrap interval of the difference to `default_linear`, on all test requests and on the randomized ones only (unbiased: their order carried no information). Written to `tools/eval/reports/{date}_ranking.md`; the run fails if the rank model does not beat `default_linear`.
+
+**Your own model.** A tenant can train on its own data with these tools and upload the result (§6).
+
+## 6. Uploaded and remote scorers
+
+A tenant (plan with BYO providers) registers a learned scorer for `prerank` or `rank`:
+- **ONNX upload.** `POST /v1/tenants/{tid}/models/uploads` → a 15-minute presigned PUT (≤ 200 MB) into the models bucket; then `POST /models` with `{kind, type: "onnx", name, version, upload_id, input_schema: {features}}`. The features (1–64, catalog names, no user features) are the model's input order. Registration reads the artifact, records its SHA-256 and dry-runs it in ONNX Runtime on two rows of declared defaults: one input `FEATURES` FP32 `[N, F]` with F = the declared count, an output `SCORES` FP32 `[N]` or `[N, 1]`, finite scores. It is `validated` at once; search-api checks the SHA-256 again when it loads the model.
+- **Remote kserve_v2.** `{kind, type: "kserve_v2", name, version, endpoint, secret_ref?, input_schema: {features}}`; `POST /models/{id}/validate` scores two rows over gRPC, then REST, and records the transport that worked.
+- **Serving.** In-process ONNX scorers run one session per (tenant, config version) with `ONNX_INTRA_OP_THREADS` (default 1) intra-op threads; remote scorers take a slot of the tenant's bulkhead. A model that cannot be loaded, or fails, falls back to the stage's input order (trace reason); it is rebuilt after 30 s.
+

@@ -26,6 +26,7 @@ type fakeSink struct {
 	mu       sync.Mutex
 	produced []events.Event
 	emitted  [][]events.Event
+	requests []events.Request
 	tenants  []tenant.ID
 	fail     bool
 }
@@ -41,10 +42,11 @@ func (f *fakeSink) Produce(_ context.Context, tid tenant.ID, evs []events.Event)
 	return nil
 }
 
-func (f *fakeSink) Emit(tid tenant.ID, evs []events.Event) {
+func (f *fakeSink) Emit(tid tenant.ID, req events.Request, evs []events.Event) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.emitted = append(f.emitted, evs)
+	f.requests = append(f.requests, req)
 	f.tenants = append(f.tenants, tid)
 }
 
@@ -305,8 +307,17 @@ func TestSearchEmitsImpressions(t *testing.T) {
 		}
 	}
 
+	for i, page := range []SearchResponse{first, second} {
+		r := h.events.requests[i]
+		if r.RequestID != page.RequestID || r.Type != "text" || r.Query != "red leather bag" || r.UserID != "u1" ||
+			r.PageOffset != page.Offset || r.Results != len(page.Results) || r.ConfigVersion != page.ConfigVersion {
+			t.Errorf("request record %d = %+v for page %+v", i, r, page.RequestID)
+		}
+	}
+
 	code, _, _ := h.do(t, http.MethodGet, "/v1/products/p01/similar?size=3", tok, "")
-	if code != http.StatusOK || len(h.events.emitted) != 3 || h.events.emitted[2][0].RequestID == "" {
-		t.Errorf("similar items: code %d, batches %d", code, len(h.events.emitted))
+	if code != http.StatusOK || len(h.events.emitted) != 3 || h.events.emitted[2][0].RequestID == "" ||
+		h.events.requests[2].Type != "similar" || h.events.requests[2].AnchorID != "p01" {
+		t.Errorf("similar items: code %d, batches %d, request %+v", code, len(h.events.emitted), h.events.requests[2:])
 	}
 }

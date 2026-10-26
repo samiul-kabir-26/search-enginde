@@ -377,48 +377,76 @@ func (s *Server) stepPolicies(r *http.Request, tid tenant.ID, body []byte) ([]pl
 	if req.ShipToRegion != "" {
 		always = append(always, cond("ship_regions", filter.Contains, req.ShipToRegion))
 	}
+	// Templates go after the tenant's rules, so compile errors keep the tenant's rule indexes.
 	rules := req.Rules
 	if req.VerifiedVendors {
-		rules = append([]tenant.PolicyRule{{ID: "template-verified-vendors", Kind: "filter", Expr: "item.vendor.verified"}}, rules...)
+		rules = append(rules, tenant.PolicyRule{ID: "template-verified-vendors", Kind: "filter", Expr: "item.vendor.verified"})
 	}
 	if rules == nil {
 		rules = []tenant.PolicyRule{}
 	}
+	// Rules compile with the draft's validation (restricted CEL environment, field names, result
+	// types, cost); errors block the step.
 	warnings, err := s.editDraft(r, tid, StepPolicies, func(c *tenant.Config) error {
 		c.Policy = tenant.PolicyConfig{AlwaysFilters: always, Rules: rules}
 		return nil
 	})
-	if err == nil && len(rules) > 0 {
-		warnings = append(warnings, fieldErr("/policy/rules", "deferred", "CEL rules are compiled and enforced from M7; they are saved now"))
-	}
 	return warnings, nil, err
 }
 
 func (s *Server) stepRanking(r *http.Request, tid tenant.ID, body []byte) ([]platform.FieldError, any, error) {
 	var req struct {
-		Mode    string             `json:"mode"`
-		Weights map[string]float64 `json:"weights"`
+		Mode           string             `json:"mode"`
+		Weights        map[string]float64 `json:"weights"`
+		PrerankModelID string             `json:"prerank_model_id"`
+		RankModelID    string             `json:"rank_model_id"`
 	}
 	if err := strictJSON(body, &req); err != nil {
 		return nil, nil, err
 	}
+	linear := func(w map[string]float64) tenant.ScorerConfig {
+		return tenant.ScorerConfig{Type: tenant.ScorerDefaultLinear, Weights: w}
+	}
+	prerank, rank := linear(nil), linear(req.Weights)
 	switch req.Mode {
 	case "", "default":
 	case "learned":
-		return nil, nil, block(fieldErr("/mode", "not_available", "the platform learned model needs interaction events and arrives in M7"))
+		// The platform models (docs/MODELS.md §2): in-process ONNX prerank, Triton rank.
+		for _, id := range []string{"prerank-gbdt-v1", "rank-gbdt-v1"} {
+			if _, err := s.PlatformScorer(r.Context(), id); err != nil {
+				return nil, nil, block(fieldErr("/mode", "not_available", err.Error()))
+			}
+		}
+		prerank = tenant.ScorerConfig{Type: tenant.ScorerONNX, Model: "prerank-gbdt-v1"}
+		rank = tenant.ScorerConfig{Type: tenant.ScorerKServeV2, Model: "rank-gbdt-v1"}
 	case "byo":
-		return nil, nil, block(fieldErr("/mode", "not_available", "BYO ranking models arrive in M7"))
+		if req.PrerankModelID == "" && req.RankModelID == "" {
+			return nil, nil, block(fieldErr("/mode", "required", "byo needs prerank_model_id, rank_model_id or both (registered models)"))
+		}
+		for _, m := range []struct {
+			id, path string
+			dst      *tenant.ScorerConfig
+		}{{req.PrerankModelID, "/prerank_model_id", &prerank}, {req.RankModelID, "/rank_model_id", &rank}} {
+			if m.id == "" {
+				continue
+			}
+			model, err := s.Tenants.Model(r.Context(), tid, m.id)
+			if errors.Is(err, tenant.ErrNotFound) {
+				return nil, nil, block(fieldErr(m.path, "not_found", "no such model"))
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+			*m.dst = tenant.ScorerConfig{Type: model.Type, ModelID: m.id}
+		}
 	default:
 		return nil, nil, block(fieldErr("/mode", "invalid", "mode must be default, learned or byo"))
 	}
 	warnings, err := s.editDraft(r, tid, StepRanking, func(c *tenant.Config) error {
-		c.Rank.Scorer.Type = tenant.ScorerDefaultLinear
-		if len(req.Weights) > 0 {
-			c.Rank.Scorer.Weights = req.Weights
-		}
+		c.Prerank.Scorer, c.Rank.Scorer = prerank, rank
 		return nil
 	})
-	return warnings, nil, err
+	return warnings, map[string]any{"prerank": prerank, "rank": rank}, err
 }
 
 func (s *Server) stepPersonalization(r *http.Request, tid tenant.ID, body []byte) ([]platform.FieldError, any, error) {

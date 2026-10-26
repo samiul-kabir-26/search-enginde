@@ -32,6 +32,8 @@ import (
 	"github.com/zavisoft/search-engine/internal/platform"
 	"github.com/zavisoft/search-engine/internal/providers/features"
 	"github.com/zavisoft/search-engine/internal/providers/lexical/opensearch"
+	"github.com/zavisoft/search-engine/internal/providers/scorer/artifacts"
+	"github.com/zavisoft/search-engine/internal/providers/scorer/onnx"
 	"github.com/zavisoft/search-engine/internal/providers/vectorstore/qdrant"
 	"github.com/zavisoft/search-engine/internal/registry"
 	"github.com/zavisoft/search-engine/internal/resilience"
@@ -70,11 +72,14 @@ type config struct {
 	ClickHouse      searchapi.ClickHouseConfig
 	KafkaBrokers    []string
 	KafkaEvents     string
+	KafkaRequests   string
 	ShadowWorkers   int
 	OTLPEndpoint    string
 	Secrets         security.SecretBackend
 	EgressTrusted   string
 	BYOConcurrency  int
+	ONNXRuntimeLib  string
+	ONNXThreads     int
 	BYOTimeout      time.Duration
 }
 
@@ -104,12 +109,15 @@ func loadConfig() (config, error) {
 		},
 		KafkaBrokers:  strings.Split(env.Required("KAFKA_BROKERS"), ","),
 		KafkaEvents:   env.String("KAFKA_TOPIC_EVENTS", events.Topic),
+		KafkaRequests: env.String("KAFKA_TOPIC_REQUESTS", events.RequestTopic),
 		ShadowWorkers: env.Int("SHADOW_WORKERS", 8),
 		OTLPEndpoint:  env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		Secrets:       security.SecretBackendFromEnv(env),
 		EgressTrusted: env.String("EGRESS_TRUSTED_HOSTS", ""),
 		// Per-tenant concurrent calls to BYO endpoints (docs/ARCHITECTURE.md §7 bulkheads).
 		BYOConcurrency: env.Int("BYO_MAX_CONCURRENCY", 32),
+		ONNXRuntimeLib: env.String("ONNXRUNTIME_LIB", ""),
+		ONNXThreads:    env.Int("ONNX_INTRA_OP_THREADS", 1),
 		BYOTimeout:     env.Duration("BYO_TIMEOUT", 10*time.Second),
 	}
 	return c, env.Err()
@@ -172,6 +180,11 @@ func run(ctx context.Context) error {
 		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
 	})
 
+	// In-process ONNX scorers need the runtime; without it they fail and S4/S5 fall back to the
+	// previous order (logged), so search keeps working.
+	if err := onnx.Init(cfg.ONNXRuntimeLib); err != nil {
+		log.Warn("ONNX Runtime unavailable; onnx scorers will fall back", "err", err)
+	}
 	meter := otel.Meter("search-api")
 	breakers, err := resilience.NewBreakers(meter, resilience.DefaultSettings())
 	if err != nil {
@@ -179,7 +192,7 @@ func run(ctx context.Context) error {
 	}
 	featureStore := features.New(rdb)
 	engine, err := pipeline.NewEngine(meter,
-		queryunderstanding.New(breakers), retrieval.New(breakers), filter.New(),
+		queryunderstanding.New(breakers), retrieval.New(breakers), filter.New(breakers, featureStore),
 		prerank.New(breakers, featureStore), rank.New(breakers), rerank.New())
 	if err != nil {
 		return err
@@ -202,6 +215,7 @@ func run(ctx context.Context) error {
 	reg := registry.New(registry.Platform{
 		Triton: triton, OpenSearch: osClient, Qdrant: qClient,
 		Centroids: &centroids.Store{Client: s3c, Bucket: cfg.S3ModelsBucket},
+		Models:    &artifacts.Store{Client: s3c, Bucket: cfg.S3ModelsBucket}, ONNXThreads: cfg.ONNXThreads,
 	}, registry.Options{Size: 1024, DrainGrace: 30 * time.Second, Refresh: 2 * time.Minute, BYO: byo}, log)
 	sink, err := searchapi.NewClickHouseSink(cfg.ClickHouse, log)
 	if err != nil {
@@ -216,7 +230,7 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("kafka: %w", err)
 	}
 	defer kafkaCl.Close()
-	producer, err := events.NewProducer(kafkaCl, cfg.KafkaEvents, meter)
+	producer, err := events.NewProducer(kafkaCl, cfg.KafkaEvents, cfg.KafkaRequests, meter)
 	if err != nil {
 		return err
 	}

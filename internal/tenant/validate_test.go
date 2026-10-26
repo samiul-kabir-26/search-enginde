@@ -95,7 +95,7 @@ func TestValidateReportsEveryRule(t *testing.T) {
 		"/rank/scorer/weights/made_up":                "unknown_feature",
 		"/rank/scorer/weights/rating":                 "out_of_range",
 		"/rank/keep":                                  "out_of_range",
-		"/prerank/scorer/model_id":                    "required",
+		"/prerank/scorer":                             "invalid",
 		"/ads/slots":                                  "invalid",
 		"/ads/slots/2":                                "out_of_range",
 		"/ads/relevance_floor":                        "out_of_range",

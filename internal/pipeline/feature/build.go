@@ -6,6 +6,9 @@ import (
 	"time"
 )
 
+// ResponseHoursCap normalizes vendor_response_hours: min(hours / cap, 1).
+const ResponseHoursCap = 48.0
+
 // Defaults are the declared values for features a candidate does not have (docs/MODELS.md §4):
 // a product without recent interactions, a vendor the tenant never sent, an anonymous user.
 func Defaults() map[string]float64 {
@@ -21,7 +24,9 @@ func Defaults() map[string]float64 {
 // Input is what the builder needs about one candidate. Retriever scores are keyed by
 // retriever name and are raw (BM25 or cosine).
 type Input struct {
-	RRF                 float64
+	RRF float64
+	// PolicyBoost is the candidate's clamped CEL boost sum (S3).
+	PolicyBoost         float64
 	Retrievers          map[string]float64
 	PriceMinor          int64
 	Rating              *float64
@@ -59,6 +64,7 @@ func Build(q QueryInput, in []Input, now time.Time) []map[string]float64 {
 			RatingCountLog:      math.Min(math.Log1p(float64(c.RatingCount))/10, 1),
 			ListingCompleteness: c.ListingCompleteness,
 			ImageCount:          math.Min(float64(c.ImageCount), 10) / 10,
+			PolicyBoost:         c.PolicyBoost,
 		}
 		if c.Rating != nil {
 			f[Rating] = *c.Rating / 5

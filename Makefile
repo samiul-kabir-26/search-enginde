@@ -149,7 +149,7 @@ test-integration: ## Run integration tests (testcontainers; needs Docker)
 
 .PHONY: cover
 cover: ## Coverage for the packages with an 80% target (unit + integration tests)
-	go test -tags integration -count=1 -coverprofile=coverage.out \
+	go test -p 1 -tags integration -count=1 -coverprofile=coverage.out \
 		-coverpkg=$$(go list ./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/security/... | grep -v -E 'stagestest|tenantdb' | paste -sd, -) \
 		./internal/pipeline/... ./internal/stages/... ./internal/tenant/... ./internal/security/... ./internal/searchapi/... ./internal/e2e/...
 	@go tool cover -func=coverage.out | tail -1
@@ -212,6 +212,13 @@ seed: .env ## Create the demo tenant and publish the catalog and vendor events (
 .PHONY: seed-events
 seed-events: .env ## Publish the simulated interaction history (data/events) to the events topic (M6)
 	@$(ENV_LOAD) go run ./cmd/seed -events
+
+.PHONY: train
+train: .env ## Learned ranking (M7): dataset from logged events, LightGBM prerank + rank, eval report, publish (TENANT=demo)
+	@$(ENV_LOAD) go run ./cmd/featurejob dataset -tenant $(or $(TENANT),demo) -out data/training/$(or $(TENANT),demo).csv.gz
+	cd tools && $(UV_RUN) python -m training.train --data ../data/training/$(or $(TENANT),demo).csv.gz
+	@$(ENV_LOAD) go run ./cmd/featurejob publish -dir tools/training/out
+	@echo "Restart Triton to load rank_gbdt_v1: docker compose --project-directory . -f deploy/docker-compose.yml restart triton"
 
 .PHONY: eval
 eval: ## Run offline eval suites against the running stack (M10)

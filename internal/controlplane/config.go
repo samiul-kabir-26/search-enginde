@@ -52,7 +52,7 @@ func (s *Server) validateDocument(ctx context.Context, tid tenant.ID, doc []byte
 	if err != nil {
 		return nil, nil, err
 	}
-	deps := tenant.ValidationDeps{Plan: plan, PlatformEmbedder: s.PlatformEmbedder}
+	deps := tenant.ValidationDeps{Plan: plan, PlatformEmbedder: s.PlatformEmbedder, PlatformScorer: s.PlatformScorer}
 	if s.BYO != nil {
 		deps.BYO = byoChecker{s: s, tid: tid, plan: plan}
 	}

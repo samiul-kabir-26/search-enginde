@@ -9,6 +9,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/pipeline/feature"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
 	"github.com/zavisoft/search-engine/internal/platform"
+	"github.com/zavisoft/search-engine/internal/providers/policy"
 )
 
 // EmbedderInfo describes what an embedder can do, for retriever availability checks.
@@ -27,6 +28,9 @@ type ValidationDeps struct {
 	// BYO resolves and live-probes registered models and connections (rules 3–5). When nil,
 	// only the checks that need no lookup run.
 	BYO BYOChecker
+	// PlatformScorer describes a platform scorer model (docs/MODELS.md §2); it fails for
+	// unknown IDs and for models not trained yet.
+	PlatformScorer func(ctx context.Context, id string) (ScorerInfo, error)
 }
 
 // Limits on config values.
@@ -36,7 +40,7 @@ const (
 	MaxFacets      = 20
 	MaxFacetSize   = 100
 	MinRankKeep    = 10
-	MaxPolicyRules = 50
+	MaxPolicyRules = policy.MaxRules
 )
 
 // Validate checks the rules of docs/TENANT_CONFIG.md §5, including the live BYO probes when
@@ -56,7 +60,7 @@ func (c *Config) Validate(ctx context.Context, deps ValidationDeps) []platform.F
 	c.validateRetrieval(&v, text, image)
 	c.validateFacets(&v, reg)
 	c.validatePolicy(&v, reg)
-	c.validateScorers(&v)
+	c.validateScorers(ctx, &v, deps)
 	c.validateAds(&v)
 	return v.errs
 }
@@ -328,31 +332,29 @@ func (c *Config) validatePolicy(v *validator, reg *catalog.Registry) {
 		_, errs := filter.Compile(f, reg, fmt.Sprintf("/policy/always_filters/%d", i))
 		v.add(errs...)
 	}
-	if len(c.Policy.Rules) > MaxPolicyRules {
-		v.fail("/policy/rules", "too_many", "at most %d rules", MaxPolicyRules)
-	}
-	ids := map[string]bool{}
-	for i, r := range c.Policy.Rules {
-		p := fmt.Sprintf("/policy/rules/%d", i)
-		if r.ID == "" || ids[r.ID] {
-			v.fail(p+"/id", "invalid", "rule ids must be non-empty and unique")
+	_, errs := policy.Compile(c.Policy.Rules, c.Catalog.CustomFieldNames())
+	for _, e := range errs {
+		p := "/policy/rules"
+		if e.Index >= 0 {
+			p = fmt.Sprintf("/policy/rules/%d/%s", e.Index, e.Field)
 		}
-		ids[r.ID] = true
-		if r.Kind != "filter" && r.Kind != "boost" {
-			v.fail(p+"/kind", "invalid", "kind must be filter or boost")
-		}
-		if len(r.Expr) == 0 || len(r.Expr) > 2048 {
-			v.fail(p+"/expr", "invalid", "expr must be 1 to 2048 bytes")
-		}
+		v.fail(p, e.Code, "%s", e.Message)
 	}
 }
 
-func (c *Config) validateScorers(v *validator) {
+func (c *Config) validateScorers(ctx context.Context, v *validator, deps ValidationDeps) {
 	cat := feature.Catalog()
-	for path, s := range map[string]StageScorerConfig{"/prerank": c.Prerank, "/rank": c.Rank} {
-		switch s.Scorer.Type {
+	for _, stage := range []struct {
+		path, kind string
+		cfg        StageScorerConfig
+	}{{"/prerank", ModelKindPrerank, c.Prerank}, {"/rank", ModelKindRank, c.Rank}} {
+		path, s := stage.path, stage.cfg.Scorer
+		switch s.Type {
 		case ScorerDefaultLinear:
-			for name, w := range s.Scorer.Weights {
+			if s.Model != "" || s.ModelID != "" {
+				v.fail(path+"/scorer", "invalid", "default_linear takes weights, not a model")
+			}
+			for name, w := range s.Weights {
 				src, ok := cat[name]
 				switch {
 				case !ok:
@@ -364,9 +366,7 @@ func (c *Config) validateScorers(v *validator) {
 				}
 			}
 		case ScorerONNX, ScorerKServeV2:
-			if s.Scorer.ModelID == "" {
-				v.fail(path+"/scorer/model_id", "required", "%s scorers need model_id", s.Scorer.Type)
-			}
+			c.validateLearned(ctx, v, deps, path, stage.kind, s)
 		default:
 			v.fail(path+"/scorer/type", "invalid", "type must be default_linear, onnx or kserve_v2")
 		}
@@ -376,6 +376,60 @@ func (c *Config) validateScorers(v *validator) {
 	}
 	if c.Prerank.Keep < c.Rank.Keep {
 		v.fail("/prerank/keep", "out_of_range", "prerank.keep must be >= rank.keep")
+	}
+}
+
+// validateLearned checks a learned scorer (rule 9): exactly one of a platform model or a
+// tenant model of the stage's kind and the declared type, validated, whose features all
+// resolve in the feature catalog and exclude user features (re-rank only).
+func (c *Config) validateLearned(ctx context.Context, v *validator, deps ValidationDeps, path, kind string, s ScorerConfig) {
+	if s.Weights != nil {
+		v.fail(path+"/scorer/weights", "invalid", "%s scorers take a model, not weights", s.Type)
+	}
+	var info ScorerInfo
+	switch {
+	case (s.Model == "") == (s.ModelID == ""):
+		v.fail(path+"/scorer", "invalid", "set exactly one of model (a platform model) or model_id (a registered model)")
+		return
+	case s.Model != "":
+		if deps.PlatformScorer == nil {
+			return
+		}
+		got, err := deps.PlatformScorer(ctx, s.Model)
+		if err != nil {
+			v.fail(path+"/scorer/model", "model_unavailable", "%v", err)
+			return
+		}
+		info = got
+	default:
+		if !deps.Plan.BYOAllowed {
+			v.fail(path+"/scorer/model_id", "plan_forbids_byo", "the %s plan does not allow BYO models", deps.Plan.ID)
+		}
+		if deps.BYO == nil {
+			return
+		}
+		got, errs := deps.BYO.Scorer(ctx, s.ModelID, kind)
+		v.add(prefixed(path+"/scorer", errs)...)
+		if len(errs) > 0 {
+			return
+		}
+		info = got
+	}
+	field := path + "/scorer/model"
+	if s.ModelID != "" {
+		field = path + "/scorer/model_id"
+	}
+	if info.Type != s.Type {
+		v.fail(field, "wrong_type", "the model is %s, not %s", info.Type, s.Type)
+	}
+	cat := feature.Catalog()
+	for _, f := range info.Features {
+		switch src, ok := cat[f]; {
+		case !ok:
+			v.fail(field, "unknown_feature", "the model's feature %q is not in the feature catalog", f)
+		case src == feature.SourceUser:
+			v.fail(field, "unavailable", "the model uses %q; user features are only available to the re-ranker", f)
+		}
 	}
 }
 
