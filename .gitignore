@@ -34,3 +34,6 @@ tools/training/out/
 .vscode/
 *.swp
 .DS_Store
+
+# Load-test tenant API keys (loadtest/setup_tenants.py)
+loadtest/.tenants.json

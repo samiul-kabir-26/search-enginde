@@ -229,9 +229,18 @@ train: .env ## Learned ranking (M7): dataset from logged events, LightGBM preran
 	@echo "Restart Triton to load rank_gbdt_v1: docker compose --project-directory . -f deploy/docker-compose.yml restart triton"
 
 .PHONY: eval
-eval: ## Run offline eval suites against the running stack (M10)
-	cd tools && $(UV_RUN) python -m eval.run
+eval: .env ## Offline eval (text, image, ranking) against the running stack; VERSION=n evaluates a published version via the playground proxy
+	@$(ENV_LOAD) cd tools && $(UV_RUN) python -m eval.run $(if $(VERSION),--version $(VERSION))
 
 .PHONY: loadtest
-loadtest: ## Run the k6 text search load test at 50 RPS (needs search-api and control-api running)
-	SEARCH_TOKEN=$$($(MAKE) -s token) k6 run loadtest/search_text.js
+loadtest: ## k6 text search at 50 RPS on the demo tenant → loadtest/reports/ (needs search-api and control-api)
+	k6 run loadtest/search_text.js
+
+.PHONY: loadtest-all
+loadtest-all: ## Every k6 scenario: text, image, similar, BYO remote rank, isolation (run loadtest-setup and slow_kserve.py first)
+	k6 run loadtest/search_text.js && k6 run loadtest/search_image.js && k6 run loadtest/similar.js && \
+	k6 run loadtest/byo_rank.js && k6 run loadtest/isolation.js
+
+.PHONY: loadtest-setup
+loadtest-setup: ## Create the lt-byo and lt-slow tenants (APIs must run with EGRESS_TRUSTED_HOSTS=localhost,127.0.0.1)
+	@$(ENV_LOAD) tools/.venv/bin/python loadtest/setup_tenants.py

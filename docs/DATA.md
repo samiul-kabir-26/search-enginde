@@ -168,8 +168,11 @@ The data-prep scripts do not compute embeddings, so indexing and query use the s
 - Queries are generated from templates over catalog attributes, for example `"{color} {material} {product_type}"`, `"{brand} {product_type}"` and `"{product_type} under {price}"`.
 - Labels are graded by attribute match: all constraints match = 3, product_type plus partial match = 1.
 - Metrics: nDCG@10, recall@100 (retrieval-only), MRR.
+- As implemented (`tools/eval/text.py`, M10): 400 queries, 100 per template (`{color} {material} {type}`, `{brand} {type}`, `{type} under ${price}`, `{color} {type}`), each seeded from a retrievable product so it has at least one exact match; deterministic for a seed. A product is graded 3 when it meets every constraint, 1 when it has the query's product type plus a partial match (for two-constraint templates, the type alone). Recall@100 counts exact matches in the top 100, out of at most 100; MRR is of the first exact match.
 
 **Ranking eval.** A held-out time split of synthetic sessions; metric is nDCG@10 against the hidden-utility labels.
+- As implemented (`tools/eval/ranking.py`, M10): the text sessions of the latest 10% of `requests.jsonl.gz` (600 by default) are replayed through search-api with their users. Gains are the simulator's click utility `σ(2·relevance + 2·quality + 1.5·affinity + 1·price_match − 2)` (relevance = the query's BM25 score over its best, from `dataprep.simulate`), computed from hidden data the engine never sees; the ideal is the best 10 of the engine's and the logged top 50. The logged order (BM25, which also defines the relevance term) is scored the same way for comparison.
+- `make eval VERSION=n` evaluates a published, non-active version through the playground proxy as the platform admin.
 
 `make eval` runs all suites against a running stack and writes `tools/eval/reports/{date}_{config_version}.md`.
 

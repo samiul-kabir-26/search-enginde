@@ -1,16 +1,18 @@
 // Text search load test (M2 target: p95 <= 150 ms at 50 RPS locally).
 //
-//   SEARCH_TOKEN=$(make -s token) k6 run loadtest/search_text.js
+//   make loadtest-text            (or: k6 run loadtest/search_text.js from the repo root)
 //
 // Queries are random colour x material x product combinations (about 8,000), so most requests
 // miss the result-snapshot cache and exercise the full pipeline. Set CACHED=1 to replay a
-// small fixed set instead and measure the cached path.
+// small fixed set instead and measure the cached path. The demo tenant's API key is read from
+// data/demo_api_key (or API_KEY).
 import http from "k6/http";
-import { check } from "k6";
 
-const BASE_URL = __ENV.BASE_URL || "http://localhost:8080";
+import { SEARCH_URL, authHeaders, checkSearch, report, tokenFor, warmUp } from "./lib.js";
+
 const RATE = Number(__ENV.RATE || 50);
 const DURATION = __ENV.DURATION || "1m";
+const API_KEY = __ENV.API_KEY || open("../data/demo_api_key").trim();
 
 const COLORS = ["red", "black", "white", "blue", "navy", "green", "grey", "brown", "pink", "gold",
   "silver", "beige", "yellow", "purple", "orange", "", "", "", "", ""];
@@ -26,16 +28,26 @@ function pick(xs) {
   return xs[Math.floor(Math.random() * xs.length)];
 }
 
-function query() {
+export function query() {
   if (__ENV.CACHED) {
     return pick(["red leather handbag", "office chair", "stainless steel water bottle", "gold earrings"]);
   }
   return [pick(COLORS), pick(MATERIALS), pick(PRODUCTS)].filter((s) => s).join(" ") + pick(SUFFIXES);
 }
 
+/**
+ * A search request body. Unless CACHED is set, each request carries a fresh user: snapshots are
+ * keyed by query and user, so repeated queries across runs still run the full pipeline.
+ */
+export function body() {
+  const b = { q: query(), page: { size: 24 } };
+  if (!__ENV.CACHED) b.user = { id: `lt_${Math.floor(Math.random() * 1e9)}` };
+  return JSON.stringify(b);
+}
+
 export const options = {
   scenarios: {
-    steady: {
+    text: {
       executor: "constant-arrival-rate",
       rate: RATE,
       timeUnit: "1s",
@@ -45,25 +57,34 @@ export const options = {
     },
   },
   thresholds: {
-    http_req_duration: ["p(95)<150"],
+    "http_req_duration{name:search_text}": ["p(95)<150"],
+    "degraded{name:search_text}": ["rate<0.01"],
     http_req_failed: ["rate<0.01"],
     checks: ["rate>0.99"],
   },
+  summaryTrendStats: ["med", "p(95)", "p(99)", "max", "count"],
 };
 
-export function setup() {
-  if (!__ENV.SEARCH_TOKEN) {
-    throw new Error("SEARCH_TOKEN is required: SEARCH_TOKEN=$(make -s token) k6 run loadtest/search_text.js");
-  }
+function search(token, name) {
+  return http.post(`${SEARCH_URL}/v1/search`, body(), {
+    headers: authHeaders(token, { "Content-Type": "application/json" }),
+    tags: { name },
+  });
 }
 
-export default function () {
-  const res = http.post(`${BASE_URL}/v1/search`, JSON.stringify({ q: query(), page: { size: 24 } }), {
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${__ENV.SEARCH_TOKEN}` },
-    tags: { name: "search_text" },
-  });
-  check(res, {
-    "status is 200": (r) => r.status === 200,
-    "not degraded": (r) => r.status === 200 && r.json("degraded") === false,
-  });
+export function setup() {
+  const token = tokenFor(API_KEY);
+  warmUp(() => search(token, "warm_up"));
+  return { token };
 }
+
+export default function (data) {
+  checkSearch(search(data.token, "search_text"), "search_text");
+}
+
+export const handleSummary = report(
+  "search_text",
+  `Text search on the demo tenant: ${RATE} RPS for ${DURATION}, random colour × material × product queries ` +
+    `(${__ENV.CACHED ? "cached set" : "a fresh user per request, so every request runs the full pipeline"}), page size 24. Target: p95 ≤ 150 ms (docs/PROJECT.md §7).`,
+  [["text search", "name:search_text"]],
+);

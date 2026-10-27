@@ -12,6 +12,26 @@ def recall_at(ranked: list[str], relevant: set[str], k: int) -> float:
     return len(set(ranked[:k]) & relevant) / len(relevant)
 
 
+def capped_recall_at(ranked: list[str], relevant: set[str], k: int) -> float:
+    """Share of the relevant set found in the top k, out of at most k: a query with more than k
+    relevant products can still reach 1."""
+    if not relevant:
+        return 0.0
+    return len(set(ranked[:k]) & relevant) / min(len(relevant), k)
+
+
+def gain_ndcg_at(ranked: list[str], gains: dict[str, float], k: int, pool: list[str]) -> float:
+    """nDCG@k with real-valued gains; the ideal ordering is the best k of `pool`."""
+
+    def dcg(gs: list[float]) -> float:
+        return sum(g / math.log2(i + 2) for i, g in enumerate(gs))
+
+    ideal = dcg(sorted((gains.get(p, 0.0) for p in pool), reverse=True)[:k])
+    if ideal == 0:
+        return 0.0
+    return dcg([gains.get(p, 0.0) for p in ranked[:k]]) / ideal
+
+
 def hit_at(ranked: list[str], target: str, k: int) -> float:
     """1 when target is in the top k, else 0."""
     return 1.0 if target in ranked[:k] else 0.0

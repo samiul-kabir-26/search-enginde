@@ -9,7 +9,23 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M9 is done** (M0–M8 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M10 is done**, and with it every milestone (M0–M9 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M10 verification (2026-10-27, same laptop: 12 cores shared by the whole dev stack, Triton, k6 and the services; every load run warmed up first and cache-cold, a fresh user per request):
+
+| Check | Result |
+|---|---|
+| `make eval` (active v5: learned scorers) | Text (400 template queries): **nDCG@10 0.369**, recall@100 0.533, MRR 0.512. Image (1,119 queries): **recall@10 0.089**, recall@50 0.212, MRR 0.039. Ranking (600 held-out sessions, hidden utility): **nDCG@10 0.831** vs 0.904 for the logged BM25 order. `tools/eval/reports/2026-10-27_v5.md` |
+| `make eval VERSION=6` (v5 with `default_linear`, published only for the comparison, not active) | Text **nDCG@10 0.538**, recall@100 0.788, MRR 0.616. Image **recall@10 0.553**, recall@50 0.710. Ranking **0.827**. `tools/eval/reports/2026-10-27_v6.md` |
+| Finding: learned scorers vs `default_linear` | With identical retrieval, M7's learned models lose on text relevance (−0.169 nDCG@10) and badly on image search (recall@10 0.089 vs 0.553), and tie on simulated utility. They were trained on text sessions only: on image queries, where every keyword feature is 0, they rank by popularity (traced: the target is in retrieval's top 10 for 20 of 49 queries, in pre-rank's for 4). The demo tenant still runs v5; switching back is a product decision (activate v6, or v2's successor) |
+| k6 text, 50 RPS | p95 **158.0 ms** (target 150; an earlier run 171.6 ms), 0 errors, 0 degraded. Under load the CEL stage (S3, budget 10 ms, now also reading online features) and pre-rank (S4, 15 ms) reach ~25 ms at p95, retrieval ~100 ms, query embedders ~50 ms. Sequentially the stages total ~56 ms |
+| k6 image, 10 RPS | p95 **84.0 ms** (target 300), 0 errors, 0 degraded |
+| k6 similar items, 50 RPS | p95 **44.9 ms** (target 150), 0 errors, 0 degraded |
+| k6 BYO remote rank, 30 RPS | lt-byo (500 products) ranks with Triton's `rank_gbdt_v1` registered as its own kserve_v2 endpoint (egress client, bulkhead, breaker): p95 **58.5 ms** (target 300), 0 errors, 0 degraded |
+| k6 isolation (demo 40 RPS + lt-slow 20 RPS, its rank endpoint answering after 2 s) | Isolation holds: the healthy tenant's p95 is 192.8 ms with the slow tenant hanging vs 183.7 ms in the identical control (endpoint fast), and across 7 earlier alternating runs the means are 134 vs 135 ms; the healthy rank stage never falls back. The slow tenant's rank stage falls back on 1,196 of 1,201 searches, quickly (breaker open; 83 probe calls in two minutes). At 60 RPS of uncached searches the laptop is saturated, so the healthy p95 misses 150 ms in both conditions (query embedders over their 40 ms budget). Report: `loadtest/reports/2026-10-27_isolation.md` |
+| Dashboards | Grafana provisions *Search overview* and *Search resilience* (folder *Search Engine*); all 16 panel queries evaluate in Prometheus with data (scraping the locally run services) |
+| Runbook | `docs/RUNBOOK.md`: start-up and warm-up, reading a trace, fallbacks and breaker states, common failures, re-indexing, rollback by activation (and shadow mode), signing keys, platform settings, eval and load testing |
+| Tests | pytest (eval: capped recall, utility nDCG, text grading and deterministic query generation) and ruff clean |
 
 M9 verification (2026-10-27, same laptop, dev stack with Triton; control-api, search-api and indexer from `make run-*`):
 
@@ -521,14 +537,20 @@ Carried forward: the playground compares versions and the draft side by side, no
 
 ---
 
-## M10 — Eval, load tests, dashboards, runbook
+## M10 — Eval, load tests, dashboards, runbook ✅
 
-**Done when:** reports are committed under `tools/eval/reports/` and `loadtest/reports/`.
+**Done when:** reports are committed under `tools/eval/reports/` and `loadtest/reports/`. **Met: `2026-10-27_v5.md` and `_v6.md`; five k6 reports (markdown + JSON) dated 2026-10-27.**
 
-- [ ] `make eval`: text (nDCG@10, recall@100, MRR), image (recall@10/50, MRR) and ranking suites → `tools/eval/reports/{date}_{version}.md`
-- [ ] k6 scenarios: text, image, similar, BYO remote rank, plus an isolation test (one slow tenant) → `loadtest/reports/`
-- [ ] Grafana dashboards (provisioned JSON) for the request/stage latency, fallback and breaker metrics in `docs/ARCHITECTURE.md` §10
-- [ ] `docs/RUNBOOK.md`: start-up, common failures, breaker states, re-index, key rotation, rollback by activation
+- [x] `make eval`: text (nDCG@10, recall@100, MRR), image (recall@10/50, MRR) and ranking suites → `tools/eval/reports/{date}_{version}.md`; `VERSION=n` evaluates a published version through the playground proxy
+- [x] k6 scenarios: text, image, similar, BYO remote rank, plus an isolation test (one slow tenant) → `loadtest/reports/` (`make loadtest-all`; `make loadtest-setup` and `loadtest/slow_kserve.py` for the last two)
+- [x] Grafana dashboards (provisioned JSON) for the request/stage latency, fallback and breaker metrics in `docs/ARCHITECTURE.md` §10
+- [x] `docs/RUNBOOK.md`: start-up, common failures, breaker states, re-index, key rotation, rollback by activation
+
+Follow-ups found by M10:
+- **Learned scorers hurt image and attribute queries** (v5 vs v6 above). Train with image sessions, or let a config choose scorers per query type, before recommending `learned`; until then the onboarding wizard's `learned` mode should say so.
+- **Text p95 at 50 RPS is 158–172 ms** on the shared laptop with the learned config (target 150): S3 (CEL with the online-feature read) and S4 exceed their budgets under concurrency. Measure on dedicated hardware before tuning; the per-request fan-out of CEL evaluation across all CPUs is the first suspect.
+- **Startup warm-up (D38)** is now well evidenced: the first searches of a tenant after a restart trip breakers. The eval and k6 scripts warm up; search-api should too.
+- `degraded` only marks stage failures; fallbacks are visible in metrics and traces only. The k6 isolation report reads them from search-api's metrics.
 
 ---
 
