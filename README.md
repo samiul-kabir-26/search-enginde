@@ -3,6 +3,7 @@
 Multi-tenant search engine microservice (Go) for a multi-vendor e-commerce platform: text, image and
 similar-item search through a pluggable six-stage pipeline, with per-tenant BYO providers.
 
+- **How it works:** [`docs/HOW_IT_WORKS.md`](docs/HOW_IT_WORKS.md) (overview with diagrams)
 - **Spec:** [`PROJECT.md`](PROJECT.md) and [`docs/`](docs/)
 - **Plan and status:** [`PLAN.md`](PLAN.md)
 
