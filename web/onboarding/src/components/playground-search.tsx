@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { playgroundSearch } from "@/app/onboarding/actions";
 import type { SearchResponse } from "@/lib/api/types";
@@ -11,6 +11,8 @@ import { Badge, Button, Card, Select } from "./ui";
 
 type Target = number | "draft";
 type Side = { target: Target; res?: SearchResponse; error?: string };
+/** What was searched, shown above the results. url is an object URL for the uploaded image. */
+type Query = { kind: "text"; text: string } | { kind: "image"; name: string; url: string };
 
 function label(t: Target) {
   return t === "draft" ? "Draft" : `Version ${t}`;
@@ -28,6 +30,12 @@ export function PlaygroundSearch({ versions }: { versions: number[] }) {
   const [q, setQ] = useState("");
   const [busy, setBusy] = useState(false);
   const [sides, setSides] = useState<Side[]>([]);
+  const [shown, setShown] = useState<Query | null>(null);
+
+  // Release the previous image preview when the query changes or the page unmounts.
+  useEffect(() => () => {
+    if (shown?.kind === "image") URL.revokeObjectURL(shown.url);
+  }, [shown]);
 
   async function runText(e: React.FormEvent) {
     e.preventDefault();
@@ -38,7 +46,10 @@ export function PlaygroundSearch({ versions }: { versions: number[] }) {
         const r = await playgroundSearch(t, q.trim());
         return r.ok ? { target: t, res: r.data } : { target: t, error: r.message ?? r.errors.map((x) => x.message).join("; ") };
       };
-      setSides(await Promise.all([primary, ...(compare === "" ? [] : [compare])].map(run)));
+      const text = q.trim();
+      const next = await Promise.all([primary, ...(compare === "" ? [] : [compare])].map(run));
+      setSides(next);
+      setShown({ kind: "text", text });
     } finally {
       setBusy(false);
     }
@@ -55,7 +66,9 @@ export function PlaygroundSearch({ versions }: { versions: number[] }) {
         const data = (await res.json().catch(() => ({}))) as SearchResponse & { detail?: string };
         return res.ok ? { target: t, res: data } : { target: t, error: data.detail ?? "Image search failed." };
       };
-      setSides(await Promise.all([primary, ...(compare === "" ? [] : [compare])].map(run)));
+      const next = await Promise.all([primary, ...(compare === "" ? [] : [compare])].map(run));
+      setSides(next);
+      setShown({ kind: "image", name: file.name, url: URL.createObjectURL(file) });
     } finally {
       setBusy(false);
     }
@@ -115,11 +128,32 @@ export function PlaygroundSearch({ versions }: { versions: number[] }) {
         </div>
       </Card>
 
-      <div aria-live="polite" aria-busy={busy} className={sides.length > 1 ? "grid gap-4 lg:grid-cols-2" : "flex flex-col gap-4"}>
-        {sides.map((s) => (
-          <ResultsColumn key={String(s.target)} side={s} />
-        ))}
+      <div aria-live="polite" aria-busy={busy} className="flex flex-col gap-3">
+        {shown && sides.length > 0 && <QueryShown query={shown} />}
+        <div className={sides.length > 1 ? "grid gap-4 lg:grid-cols-2" : "flex flex-col gap-4"}>
+          {sides.map((s) => (
+            <ResultsColumn key={String(s.target)} side={s} />
+          ))}
+        </div>
       </div>
+    </div>
+  );
+}
+
+function QueryShown({ query }: { query: Query }) {
+  return (
+    <div className="flex items-center gap-3 text-sm" data-testid="playground-query">
+      <span className="text-zinc-500">Results for</span>
+      {query.kind === "text" ? (
+        <span className="font-semibold">“{query.text}”</span>
+      ) : (
+        <span className="flex min-w-0 items-center gap-2">
+          {/* A local object URL of the uploaded file. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={query.url} alt="The uploaded search image" className="h-12 w-12 shrink-0 rounded border border-zinc-200 object-cover dark:border-zinc-800" />
+          <span className="truncate font-semibold">{query.name}</span>
+        </span>
+      )}
     </div>
   );
 }
