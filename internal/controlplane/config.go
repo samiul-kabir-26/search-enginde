@@ -56,6 +56,11 @@ func (s *Server) validateDocument(ctx context.Context, tid tenant.ID, doc []byte
 	if s.BYO != nil {
 		deps.BYO = byoChecker{s: s, tid: tid, plan: plan}
 	}
+	if s.Settings != nil {
+		a := s.Settings.Get().Ads
+		deps.Ads = tenant.AdsLimits{MaxSlots: a.MaxSlots, MinRelevanceFloor: a.MinRelevanceFloor,
+			MinReserveMinor: a.ReserveBounds.MinMinor, MaxReserveMinor: a.ReserveBounds.MaxMinor}
+	}
 	errs := cfg.Validate(ctx, deps)
 	if errs == nil {
 		errs = []platform.FieldError{}

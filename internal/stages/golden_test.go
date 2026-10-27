@@ -7,10 +7,13 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/metric/noop"
 
+	"github.com/zavisoft/search-engine/internal/ads"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/stages/filter"
 	"github.com/zavisoft/search-engine/internal/stages/prerank"
@@ -19,6 +22,7 @@ import (
 	"github.com/zavisoft/search-engine/internal/stages/rerank"
 	"github.com/zavisoft/search-engine/internal/stages/retrieval"
 	"github.com/zavisoft/search-engine/internal/stages/stagestest"
+	"github.com/zavisoft/search-engine/internal/tenant"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -158,5 +162,102 @@ func TestEmbedderOutageFallsBackToLexical(t *testing.T) {
 		if _, ok := c.Retrievers["lexical_bm25"]; !ok {
 			t.Errorf("%s came from a vector retriever without a query vector", c.ProductID)
 		}
+	}
+}
+
+type fakeAdStore struct {
+	creatives []ads.ActiveCreative
+}
+
+func (f *fakeAdStore) ListActiveCreatives(_ context.Context, _ tenant.ID) ([]ads.ActiveCreative, error) {
+	return f.creatives, nil
+}
+
+// TestAdsGoldenAndOrganicPreservation verifies M8: sponsored slots are honored,
+// and organic ranking is unaffected when ads are disabled (golden baseline).
+func TestAdsGoldenAndOrganicPreservation(t *testing.T) {
+	res := stagestest.Resolved()
+	p, _, _ := stagestest.Providers()
+	q := &pipeline.Query{
+		Tenant: res.Tenant.ID, ConfigVersion: res.ConfigVersion, Type: pipeline.QueryText,
+		Raw: "Red leather handbag under $50", BaseFilter: res.AlwaysFilters, Depth: 1000,
+	}
+
+	// 1. Pre-ads baseline with default config (ads.enabled = false)
+	stBase, _ := engine(t).Run(context.Background(), res, p, q)
+	var baselineIDs []string
+	for _, c := range stBase.Candidates {
+		if c.Sponsored {
+			t.Errorf("candidate %s must not be sponsored when ads are disabled", c.ProductID)
+		}
+		baselineIDs = append(baselineIDs, c.ProductID)
+	}
+	wantGoldenIDs := []string{"p01", "p10", "p05", "p04", "p07", "p09"}
+	if !bytes.Equal([]byte(strings.Join(baselineIDs, ",")), []byte(strings.Join(wantGoldenIDs, ","))) {
+		t.Fatalf("baseline organic output = %v, want %v", baselineIDs, wantGoldenIDs)
+	}
+
+	// 2. Enable ads with a creative for p05 placed at slot 1
+	resWithAds := stagestest.Resolved()
+	resWithAds.Config.Ads.Enabled = true
+	resWithAds.Config.Ads.Slots = []int{1}
+	resWithAds.Config.Ads.RelevanceFloor = 0.1
+
+	now := time.Now()
+	adStore := &fakeAdStore{
+		creatives: []ads.ActiveCreative{
+			{
+				CampaignID:       "c_gold",
+				TenantID:         res.Tenant.ID,
+				VendorID:         "v_r",
+				DailyBudgetMinor: 5000,
+				BidMinor:         100,
+				StartAt:          now.Add(-time.Hour),
+				ProductID:        "p05",
+			},
+		},
+	}
+	b := stagestest.Breakers()
+	blender := ads.NewBlender(adStore, nil)
+	rerankWithAds := rerank.New(rerank.WithBlender(blender), rerank.WithClock(func() time.Time { return now }))
+	engineWithAds, err := pipeline.NewEngine(noop.NewMeterProvider().Meter("test"),
+		queryunderstanding.New(b), retrieval.New(b), filter.New(b, nil), prerank.New(b, nil), rank.New(b), rerankWithAds)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stAds, _ := engineWithAds.Run(context.Background(), resWithAds, p, q)
+	if len(stAds.Candidates) != len(wantGoldenIDs) {
+		t.Fatalf("result count = %d, want %d", len(stAds.Candidates), len(wantGoldenIDs))
+	}
+	// Slot 1 (index 0) must be p05 with Sponsored=true
+	if stAds.Candidates[0].ProductID != "p05" || !stAds.Candidates[0].Sponsored {
+		t.Fatalf("slot 1 = %+v, want p05 sponsored", stAds.Candidates[0])
+	}
+	// Organic duplicates of p05 must be removed and other organic items preserve their order:
+	// Original: p01, p10, p05, p04, p07, p09
+	// Deduped organic remaining: p01, p10, p04, p07, p09
+	wantWithAds := []string{"p05", "p01", "p10", "p04", "p07", "p09"}
+	for i, want := range wantWithAds {
+		if stAds.Candidates[i].ProductID != want {
+			t.Errorf("pos %d: got %s, want %s", i, stAds.Candidates[i].ProductID, want)
+		}
+		if i > 0 && stAds.Candidates[i].Sponsored {
+			t.Errorf("pos %d (%s) should not be sponsored", i, stAds.Candidates[i].ProductID)
+		}
+	}
+
+	// 3. Disable ads again -> output is identical to the baseline
+	resWithAds.Config.Ads.Enabled = false
+	stDisabled, _ := engineWithAds.Run(context.Background(), resWithAds, p, q)
+	var disabledIDs []string
+	for _, c := range stDisabled.Candidates {
+		if c.Sponsored {
+			t.Errorf("candidate %s must not be sponsored when ads disabled", c.ProductID)
+		}
+		disabledIDs = append(disabledIDs, c.ProductID)
+	}
+	if !bytes.Equal([]byte(strings.Join(disabledIDs, ",")), []byte(strings.Join(wantGoldenIDs, ","))) {
+		t.Fatalf("ads disabled output = %v, want identical to baseline %v", disabledIDs, wantGoldenIDs)
 	}
 }

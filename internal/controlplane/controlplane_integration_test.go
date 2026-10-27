@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -544,5 +545,80 @@ func TestControlPlane(t *testing.T) {
 			t.Error("rotate must return the new kid")
 		}
 		admin.expect(http.StatusOK, admin.do("GET", "/v1/admin/tenants?limit=10", nil), "tenants")
+	})
+
+	t.Run("ads campaigns, creatives, and reports", func(t *testing.T) {
+		// The admin subtest revoked the key that signed the owner's token.
+		lr := owner.expect(http.StatusOK, owner.do("POST", "/v1/auth/login", map[string]string{"tenant": "acme", "email": "owner@acme.test", "password": password}), "relogin")
+		owner.token = lr.body["access_token"].(string)
+
+		campInput := map[string]any{
+			"vendor_id":          "v_test",
+			"status":             "active",
+			"daily_budget_minor": 10000,
+			"currency":           "USD",
+			"bid_minor":          150,
+			"targeting": map[string]any{
+				"categories": []string{"shoes"},
+				"keywords":   []string{"running"},
+			},
+			"start_at": "2026-08-01T00:00:00Z",
+		}
+		bad := map[string]any{}
+		maps.Copy(bad, campInput)
+		bad["targeting"] = map[string]any{"regions": []string{"eu"}}
+		if errorCodes(owner.expect(http.StatusBadRequest, owner.do("POST", base+"/ads/campaigns", bad, "Idempotency-Key", "camp-bad"), "unknown targeting"))["/targeting"] != "invalid" {
+			t.Error("unknown targeting dimensions must be refused")
+		}
+		cr := owner.expect(http.StatusCreated, owner.do("POST", base+"/ads/campaigns", campInput, "Idempotency-Key", "camp-1"), "create campaign")
+		campID := cr.body["id"].(string)
+		if campID == "" {
+			t.Fatal("campaign ID empty")
+		}
+
+		gr := owner.expect(http.StatusOK, owner.do("GET", base+"/ads/campaigns/"+campID, nil), "get campaign")
+		if gr.body["vendor_id"] != "v_test" || gr.body["daily_budget_minor"].(float64) != 10000 {
+			t.Errorf("unexpected campaign: %v", gr.body)
+		}
+
+		lc := owner.expect(http.StatusOK, owner.do("GET", base+"/ads/campaigns", nil), "list campaigns")
+		if items := lc.body["items"].([]any); len(items) == 0 {
+			t.Errorf("expected at least 1 campaign, got %v", items)
+		}
+
+		upd := map[string]any{}
+		maps.Copy(upd, campInput)
+		upd["daily_budget_minor"], upd["status"] = 15000, "paused"
+		ur := owner.expect(http.StatusOK, owner.do("PUT", base+"/ads/campaigns/"+campID, upd), "update campaign")
+		if ur.body["daily_budget_minor"].(float64) != 15000 || ur.body["status"] != "paused" {
+			t.Errorf("unexpected updated campaign: %v", ur.body)
+		}
+
+		creatResp := owner.expect(http.StatusCreated, owner.do("POST", base+"/ads/campaigns/"+campID+"/creatives", map[string]any{
+			"product_id": "p_123",
+		}, "Idempotency-Key", "creat-1"), "create creative")
+		creatID := creatResp.body["id"].(string)
+		if creatID == "" {
+			t.Fatal("creative ID empty")
+		}
+		owner.expect(http.StatusConflict, owner.do("POST", base+"/ads/campaigns/"+campID+"/creatives", map[string]any{
+			"product_id": "p_123",
+		}, "Idempotency-Key", "creat-2"), "duplicate creative")
+
+		clResp := owner.expect(http.StatusOK, owner.do("GET", base+"/ads/campaigns/"+campID+"/creatives", nil), "list creatives")
+		if cItems := clResp.body["items"].([]any); len(cItems) != 1 {
+			t.Errorf("expected 1 creative, got %v", cItems)
+		}
+
+		// No ClickHouse in this test: the report is empty, not an error.
+		repResp := owner.expect(http.StatusOK, owner.do("GET", base+"/ads/reports?from=2026-01-01&to=2026-12-31", nil), "ads report")
+		if rows, ok := repResp.body["rows"].([]any); !ok || len(rows) != 0 {
+			t.Errorf("ads report = %s, want empty rows", repResp.raw)
+		}
+		owner.expect(http.StatusBadRequest, owner.do("GET", base+"/ads/reports?from=2026-12-31&to=2026-01-01", nil), "inverted report range")
+
+		owner.expect(http.StatusNoContent, owner.do("DELETE", base+"/ads/campaigns/"+campID+"/creatives/"+creatID, nil), "delete creative")
+		owner.expect(http.StatusNoContent, owner.do("DELETE", base+"/ads/campaigns/"+campID, nil), "delete campaign")
+		owner.expect(http.StatusNotFound, owner.do("GET", base+"/ads/campaigns/"+campID, nil), "get deleted campaign")
 	})
 }

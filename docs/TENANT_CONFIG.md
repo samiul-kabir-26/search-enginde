@@ -212,8 +212,8 @@ The referenced `tenant_models` row is a validated `embedder` of `type` `kserve_v
 10. `prerank.keep` must be ≥ `rank.keep`, which must be ≥ 10.
 
 **Ads**
-11. `ads.slots` must be strictly increasing and within `[1, rank.keep]`.
-12. `relevance_floor` must be in `[0, 1]`.
+11. `ads.slots` must be strictly increasing and within `[1, rank.keep]`, and at most the admin's `max_slots` (`platform_settings.ads`).
+12. `relevance_floor` must be in `[0, 1]` and, when ads are enabled, at least the admin's `min_relevance_floor`. The optional `reserve_cpc_minor` (default 1 minor unit), the lowest price a sponsored click clears at, must be within the admin's `reserve_bounds`.
 
 **Mapping**
 13. `field_mapping` is a JSONPath per field. Keys must be mappable canonical fields, every mandatory field must be mapped, and every expression must parse. It is validated against a sample payload supplied in onboarding step 2.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/redis/go-redis/v9"
 
@@ -49,8 +50,9 @@ type Server struct {
 	Models      ModelStore
 	ModelBucket string
 	// ONNXReady reports that ONNX Runtime loaded, so uploaded models can be dry-run.
-	ONNXReady bool
-	Log       *slog.Logger
+	ONNXReady  bool
+	ClickHouse driver.Conn
+	Log        *slog.Logger
 
 	probes probeCache
 }
@@ -65,6 +67,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	s.playgroundRoutes(mux)
 	s.byoRoutes(mux)
 	s.adminRoutes(mux)
+	s.adsRoutes(mux)
 }
 
 func problem(w http.ResponseWriter, status int, detail string, errs ...platform.FieldError) {

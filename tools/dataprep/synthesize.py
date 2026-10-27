@@ -26,6 +26,19 @@ DATA = ROOT / "data"
 PRICE_PARAMS = Path(__file__).with_name("price_params.yaml")
 
 REGIONS = ["US", "CA", "GB", "IN", "AU", "DE", "FR", "JP", "MX", "AE"]
+CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
+
+def make_ulid(ts_ms: int, rand_bytes: bytes) -> str:
+    """Encodes a 48-bit timestamp and 80-bit randomness into a 26-char Crockford Base32 ULID."""
+    val = (ts_ms << 80) | int.from_bytes(rand_bytes, "big")
+    chars = []
+    for _ in range(26):
+        chars.append(CROCKFORD[val & 0x1F])
+        val >>= 5
+    return "".join(reversed(chars))
+
+
 NAME_A = [
     "North",
     "Blue",
@@ -203,6 +216,98 @@ def synthesize(raw: list[dict], seed: int, n_vendors: int, ref: datetime, price_
     return vendors, products, item_q, vendor_q
 
 
+def synthesize_campaigns(
+    products: list[dict],
+    vendors: list[dict],
+    seed: int,
+    n_campaigns: int,
+    ref: datetime,
+) -> list[dict]:
+    rng = np.random.default_rng(seed + 999)
+    by_vendor: dict[str, list[dict]] = {}
+    for p in products:
+        if p.get("status") == "active":
+            by_vendor.setdefault(p["vendor_id"], []).append(p)
+
+    active_vendors = [v for v in vendors if v["vendor_id"] in by_vendor]
+    if not active_vendors:
+        return []
+
+    n_target = min(n_campaigns, max(1, len(products) * 3))
+    campaigns = []
+    for i in range(n_target):
+        v = active_vendors[i % len(active_vendors)]
+        v_prods = by_vendor[v["vendor_id"]]
+        k = min(len(v_prods), int(rng.integers(1, 6)))
+        chosen_indices = rng.choice(len(v_prods), size=k, replace=False)
+        chosen_prods = [v_prods[idx] for idx in chosen_indices]
+
+        days_ago = int(rng.integers(10, 60))
+        start_dt = ref - timedelta(days=days_ago)
+        ts_ms = int(start_dt.timestamp() * 1000)
+
+        camp_id = make_ulid(ts_ms, rng.bytes(10))
+        creatives = [
+            {
+                "id": make_ulid(ts_ms, rng.bytes(10)),
+                "campaign_id": camp_id,
+                "product_id": p["product_id"],
+            }
+            for p in chosen_prods
+        ]
+
+        cats = set()
+        words = set()
+        for p in chosen_prods:
+            for c in p.get("category_ids", []):
+                cats.add(c)
+            for w in p.get("title", "").split():
+                clean_w = "".join(ch for ch in w.lower() if ch.isalnum())
+                if len(clean_w) > 3:
+                    words.add(clean_w)
+
+        sorted_cats = sorted(cats)
+        sorted_words = sorted(words)
+        targeting = {}
+        if rng.random() < 0.70:
+            if sorted_cats:
+                n_cats = min(len(sorted_cats), int(rng.integers(1, 3)))
+                targeting["categories"] = sorted(
+                    rng.choice(sorted_cats, size=n_cats, replace=False).tolist()
+                )
+            if sorted_words:
+                n_words = min(len(sorted_words), int(rng.integers(1, 4)))
+                targeting["keywords"] = sorted(
+                    rng.choice(sorted_words, size=n_words, replace=False).tolist()
+                )
+
+        status = "active" if rng.random() < 0.95 else "paused"
+        daily_budget = int(rng.choice([5000, 10000, 15000, 25000, 50000, 100000]))
+        bid = int(rng.integers(25, 350))
+
+        end_at = None
+        if rng.random() < 0.10:
+            end_dt = ref + timedelta(days=int(rng.integers(30, 180)))
+            end_at = end_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        campaigns.append(
+            {
+                "id": camp_id,
+                "vendor_id": v["vendor_id"],
+                "status": status,
+                "daily_budget_minor": daily_budget,
+                "currency": "USD",
+                "bid_minor": bid,
+                "targeting": targeting,
+                "start_at": start_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "end_at": end_at,
+                "creatives": creatives,
+            }
+        )
+
+    return campaigns
+
+
 def write_jsonl(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -214,6 +319,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--vendors", type=int, default=200)
+    ap.add_argument("--campaigns", type=int, default=300)
     ap.add_argument(
         "--ref-date",
         default="2026-10-01",
@@ -226,10 +332,12 @@ def main() -> None:
     ref = datetime.fromisoformat(args.ref_date).replace(tzinfo=UTC)
     params = yaml.safe_load(PRICE_PARAMS.read_text())
     vendors, products, item_q, vendor_q = synthesize(raw, args.seed, args.vendors, ref, params)
+    campaigns = synthesize_campaigns(products, vendors, args.seed, args.campaigns, ref)
 
     out = {
         "vendors.jsonl": vendors,
         "products.canonical.jsonl": products,
+        "campaigns.jsonl": campaigns,
         "hidden/item_quality.jsonl": item_q,
         "hidden/vendor_quality.jsonl": vendor_q,
     }
@@ -241,13 +349,17 @@ def main() -> None:
         {
             "seed": args.seed,
             "vendors": args.vendors,
+            "campaigns": args.campaigns,
             "ref_date": args.ref_date,
             "price_params_sha256": manifest.sha256_file(PRICE_PARAMS),
         },
         [args.data / n for n in out],
     )
     active = sum(1 for p in products if p["status"] == "active")
-    print(f"{len(products)} products ({active} active), {len(vendors)} vendors")
+    print(
+        f"{len(products)} products ({active} active), {len(vendors)} vendors, "
+        f"{len(campaigns)} campaigns"
+    )
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ func TestEventsToOnlineFeatures(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ch.Close()
-	producer, err := events.NewProducer(kc, events.Topic, noop.NewMeterProvider().Meter("t"))
+	producer, err := events.NewProducer(kc, events.Topic, events.RequestTopic, noop.NewMeterProvider().Meter("t"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -249,6 +249,9 @@ type AdsConfig struct {
 	Slots          []int   `json:"slots"`
 	RelevanceFloor float64 `json:"relevance_floor"`
 	Auction        string  `json:"auction"`
+	// ReserveCPCMinor is the lowest price a click clears at (default 1 minor unit), within
+	// the admin's reserve bounds.
+	ReserveCPCMinor int64 `json:"reserve_cpc_minor,omitempty"`
 }
 
 // migrations upgrade a document from schema_version n (the key) to n+1. There are none yet;

@@ -328,6 +328,15 @@ func (r *Registry) For(ctx context.Context, res *tenant.Resolved) (*pipeline.Pro
 			"prerank": cfg.Prerank.Scorer.ModelID != "", "rank": cfg.Rank.Scorer.ModelID != "",
 		},
 	}
+	if cfg.Rerank.Model != nil && cfg.Rerank.Model.Type != "" {
+		rerankObj, err := r.get(ctx, res, "rerank", KindScorer, cfg.Rerank.Model.Type, tenant.StageScorerConfig{Scorer: *cfg.Rerank.Model}, nil, r.ttlFor(scorerProvider(*cfg.Rerank.Model)))
+		if err == nil {
+			rr := rerankObj.(pipeline.Scorer)
+			p.Rerank = rr
+			p.Names["rerank"] = nameOf(rr, cfg.Rerank.Model.Type)
+			p.BYO["rerank"] = cfg.Rerank.Model.ModelID != ""
+		}
+	}
 	if len(cfg.Policy.Rules) > 0 {
 		pol, err := r.get(ctx, res, "policy", KindPolicy, "cel", cfg.Policy, nil, 0)
 		if err != nil {

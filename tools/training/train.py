@@ -59,12 +59,14 @@ NON_FEATURES = {"policy_boost"}
 MODELS = {
     "prerank-gbdt-v1": {
         "type": "onnx",
+        "baseline": "default_linear (prerank)",
         "max_trees": 120,
         "num_leaves": 15,
         "learning_rates": [0.05, 0.1, 0.15, 0.2],
     },
     "rank-gbdt-v1": {
         "type": "kserve_v2",
+        "baseline": "default_linear (rank)",
         "max_trees": 500,
         "num_leaves": 31,
         "learning_rates": [0.05, 0.1],
@@ -291,16 +293,22 @@ def main() -> None:
     for subset, e in (("all", None), ("ips", eta)):
         part = test
         per = {name: per_request(part, col, e) for name, col in rows.items()}
-        base = per["default_linear (rank)"].ndcg10.to_numpy()
+        # Each model is compared with default_linear at its own stage.
         evals[subset] = {
             "table": {name: (p.ndcg10.mean(), p.rr.mean()) for name, p in per.items()},
-            "diffs": {m: bootstrap_diff(per[m].ndcg10.to_numpy(), base, args.seed) for m in MODELS},
+            "diffs": {
+                m: bootstrap_diff(
+                    per[m].ndcg10.to_numpy(), per[spec["baseline"]].ndcg10.to_numpy(), args.seed
+                )
+                for m, spec in MODELS.items()
+            },
             "requests": part.request_id.nunique(),
         }
     table = evals["all"]["table"]
 
     trained_at = dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     for model_id, r in results.items():
+        baseline = MODELS[model_id]["baseline"]
         manifest = {
             "id": model_id,
             "type": r["type"],
@@ -311,9 +319,9 @@ def main() -> None:
             "metrics": {
                 "test_ndcg10": round(table[model_id][0], 4),
                 "test_mrr": round(table[model_id][1], 4),
-                "baseline_ndcg10": round(table["default_linear (rank)"][0], 4),
+                "baseline_ndcg10": round(table[baseline][0], 4),
                 "ips_test_ndcg10": round(evals["ips"]["table"][model_id][0], 4),
-                "ips_baseline_ndcg10": round(evals["ips"]["table"]["default_linear (rank)"][0], 4),
+                "ips_baseline_ndcg10": round(evals["ips"]["table"][baseline][0], 4),
                 "valid_ndcg10": round(r["valid_ndcg10"], 4),
                 "learning_rate": r["learning_rate"],
                 "trees": r["trees"],
@@ -361,19 +369,19 @@ def write_report(args, summary, evals, results, took, trained_at) -> Path:
         "advantage from position bias.",
     }
     for subset, ev in evals.items():
-        base = ev["table"]["default_linear (rank)"][0]
         lines += [
             f"## {titles[subset]} ({ev['requests']:,} requests)",
             "",
             notes[subset],
             "",
-            "| Ranker | nDCG@10 | MRR | Δ nDCG@10 vs default_linear (95% CI) |",
+            "| Ranker | nDCG@10 | MRR | Δ nDCG@10 vs default_linear at its stage (95% CI) |",
             "|---|---|---|---|",
         ]
         for name, (nd, mrr) in ev["table"].items():
             ci = ""
             if name in ev["diffs"]:
                 lo, hi = ev["diffs"][name]
+                base = ev["table"][MODELS[name]["baseline"]][0]
                 ci = f"{nd - base:+.4f} [{lo:+.4f}, {hi:+.4f}]"
             lines.append(f"| {name} | {nd:.4f} | {mrr:.4f} | {ci} |")
         lines.append("")

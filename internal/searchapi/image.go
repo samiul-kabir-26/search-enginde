@@ -217,8 +217,9 @@ func (s *Service) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	reqID := ulid.Make().String()
 	q := &pipeline.Query{
-		Tenant: p.Tenant, ConfigVersion: res.ConfigVersion, Type: pipeline.QuerySimilar, AnchorID: id,
+		RequestID: reqID, Tenant: p.Tenant, ConfigVersion: res.ConfigVersion, Type: pipeline.QuerySimilar, AnchorID: id,
 		ImageVector: anchor.Vectors[pipeline.VectorImage], TextVector: anchor.Vectors[pipeline.VectorText],
 		Filter:     filter.Expr{Cond: &filter.Condition{Field: "product_id", Op: filter.Ne, Value: id, Type: catalog.TypeKeyword}},
 		BaseFilter: res.AlwaysFilters, Depth: size,
@@ -232,7 +233,7 @@ func (s *Service) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	resp.RequestID = ulid.Make().String()
+	resp.RequestID = reqID
 	s.emitServed(p.Tenant, resp, q)
 	platform.WriteJSON(w, http.StatusOK, resp)
 }

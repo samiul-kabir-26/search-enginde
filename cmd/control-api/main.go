@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -57,6 +59,10 @@ type config struct {
 	OTLPEndpoint     string
 	Secrets          security.SecretBackend
 	EgressTrusted    string
+	ClickHouseAddr   string
+	ClickHouseDB     string
+	ClickHouseUser   string
+	ClickHousePass   string
 }
 
 func loadConfig() (config, error) {
@@ -85,6 +91,10 @@ func loadConfig() (config, error) {
 		OTLPEndpoint:     env.String("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 		Secrets:          security.SecretBackendFromEnv(env),
 		EgressTrusted:    env.String("EGRESS_TRUSTED_HOSTS", ""),
+		ClickHouseAddr:   env.String("CLICKHOUSE_ADDR", ""),
+		ClickHouseDB:     env.String("CLICKHOUSE_DB", "searchengine"),
+		ClickHouseUser:   env.String("CLICKHOUSE_USER", "default"),
+		ClickHousePass:   env.String("CLICKHOUSE_PASSWORD", ""),
 	}
 	return c, env.Err()
 }
@@ -162,6 +172,23 @@ func run(ctx context.Context) error {
 		Region: cfg.S3Region, BaseEndpoint: aws.String(cfg.S3Endpoint), UsePathStyle: true,
 		Credentials: credentials.NewStaticCredentialsProvider(cfg.S3AccessKey, cfg.S3SecretKey, ""),
 	})}
+	var chConn driver.Conn
+	if cfg.ClickHouseAddr != "" {
+		c, err := clickhouse.Open(&clickhouse.Options{
+			Addr: []string{cfg.ClickHouseAddr},
+			Auth: clickhouse.Auth{
+				Database: cfg.ClickHouseDB,
+				Username: cfg.ClickHouseUser,
+				Password: cfg.ClickHousePass,
+			},
+		})
+		if err == nil {
+			chConn = c
+			defer chConn.Close()
+		} else {
+			log.Warn("clickhouse connection failed; ads reports will be unavailable", "err", err)
+		}
+	}
 	srv := &controlplane.Server{
 		DB: db, Q: q, Tenants: tenants, Keys: keys, Verifier: auth.NewLocalVerifier(keys, cfg.JWTIssuer),
 		Settings: settings, Mailer: controlplane.SMTPMailer{Addr: cfg.SMTPAddr, From: cfg.MailFrom}, Redis: rdb,
@@ -169,7 +196,7 @@ func run(ctx context.Context) error {
 		SearchURL: cfg.SearchURL, HTTPClient: &http.Client{Timeout: 10 * time.Second},
 		AppBaseURL: cfg.AppBaseURL, SecureCookies: cfg.AppEnv != "dev",
 		PlatformEmbedder: registry.PlatformEmbedderInfo, BYO: byo, Models: models, ModelBucket: cfg.S3ModelsBucket,
-		ONNXReady: onnxReady, Log: log,
+		ONNXReady: onnxReady, ClickHouse: chConn, Log: log,
 	}
 
 	mux := http.NewServeMux()

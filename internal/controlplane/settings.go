@@ -56,23 +56,68 @@ type AuthSettings struct {
 	EmailVerificationTTL Duration            `json:"email_verification_ttl"`
 }
 
+// AdsSettings are the admin-controlled ad policies (PLAN.md R10).
+type AdsSettings struct {
+	TenantFields      []string            `json:"tenant_fields"`
+	Disclosure        SponsoredDisclosure `json:"disclosure"`
+	MaxSlots          int                 `json:"max_slots"`
+	MinRelevanceFloor float64             `json:"min_relevance_floor"`
+	ReserveBounds     ReserveBounds       `json:"reserve_bounds"`
+	PerPlan           map[string]any      `json:"per_plan,omitempty"`
+}
+
+// SponsoredDisclosure defines disclosure requirements for sponsored results.
+type SponsoredDisclosure struct {
+	Label          string `json:"label"`
+	VendorName     bool   `json:"vendor_name"`
+	DisclosureLink string `json:"disclosure_link"`
+}
+
+// ReserveBounds bounds acceptable reserve CPC prices.
+type ReserveBounds struct {
+	MinMinor int64 `json:"min_minor"`
+	MaxMinor int64 `json:"max_minor"`
+}
+
 // PlatformSettings holds every section.
 type PlatformSettings struct {
 	Auth AuthSettings `json:"auth"`
+	Ads  AdsSettings  `json:"ads"`
 }
 
-// DefaultSettings are the R7 defaults.
+// DefaultAdsSettings returns R10 defaults for ad policies.
+func DefaultAdsSettings() AdsSettings {
+	return AdsSettings{
+		TenantFields: []string{"bid_minor", "daily_budget_minor", "status", "targeting", "start_at", "end_at"},
+		Disclosure: SponsoredDisclosure{
+			Label:          "Sponsored",
+			VendorName:     true,
+			DisclosureLink: "https://example.com/ads-info",
+		},
+		MaxSlots:          10,
+		MinRelevanceFloor: 0.10,
+		ReserveBounds: ReserveBounds{
+			MinMinor: 1,
+			MaxMinor: 10000,
+		},
+	}
+}
+
+// DefaultSettings are the R7 & R10 defaults.
 func DefaultSettings() PlatformSettings {
-	return PlatformSettings{Auth: AuthSettings{
-		Password:             auth.DefaultPasswordParams(),
-		PasswordMinLength:    12,
-		AccessTokenTTL:       Duration(15 * time.Minute),
-		RefreshTokenTTL:      Duration(7 * 24 * time.Hour),
-		APITokenTTL:          Duration(15 * time.Minute),
-		KeyRotation:          Duration(30 * 24 * time.Hour),
-		KeyRetention:         Duration(7 * 24 * time.Hour),
-		EmailVerificationTTL: Duration(24 * time.Hour),
-	}}
+	return PlatformSettings{
+		Auth: AuthSettings{
+			Password:             auth.DefaultPasswordParams(),
+			PasswordMinLength:    12,
+			AccessTokenTTL:       Duration(15 * time.Minute),
+			RefreshTokenTTL:      Duration(7 * 24 * time.Hour),
+			APITokenTTL:          Duration(15 * time.Minute),
+			KeyRotation:          Duration(30 * 24 * time.Hour),
+			KeyRetention:         Duration(7 * 24 * time.Hour),
+			EmailVerificationTTL: Duration(24 * time.Hour),
+		},
+		Ads: DefaultAdsSettings(),
+	}
 }
 
 // Validate checks every setting against its bounds.
@@ -112,6 +157,24 @@ func (s PlatformSettings) Validate() []platform.FieldError {
 	if s.Auth.PasswordMinLength < 8 || s.Auth.PasswordMinLength > 64 {
 		errs = append(errs, platform.FieldError{Path: "/auth/password_min_length", Code: "out_of_range", Message: "must be within [8, 64]"})
 	}
+	if s.Ads.MaxSlots < 1 || s.Ads.MaxSlots > 50 {
+		errs = append(errs, platform.FieldError{Path: "/ads/max_slots", Code: "out_of_range", Message: "must be within [1, 50]"})
+	}
+	if s.Ads.MinRelevanceFloor < 0 || s.Ads.MinRelevanceFloor > 1 {
+		errs = append(errs, platform.FieldError{Path: "/ads/min_relevance_floor", Code: "out_of_range", Message: "must be within [0, 1]"})
+	}
+	if s.Ads.ReserveBounds.MinMinor < 0 {
+		errs = append(errs, platform.FieldError{Path: "/ads/reserve_bounds/min_minor", Code: "out_of_range", Message: "must be >= 0"})
+	}
+	if s.Ads.ReserveBounds.MaxMinor < s.Ads.ReserveBounds.MinMinor {
+		errs = append(errs, platform.FieldError{Path: "/ads/reserve_bounds/max_minor", Code: "out_of_range", Message: "must be >= min_minor"})
+	}
+	if s.Ads.Disclosure.Label == "" {
+		errs = append(errs, platform.FieldError{Path: "/ads/disclosure/label", Code: "required", Message: "label is required"})
+	}
+	if len(s.Ads.TenantFields) == 0 {
+		errs = append(errs, platform.FieldError{Path: "/ads/tenant_fields", Code: "required", Message: "at least one tenant field is required"})
+	}
 	return errs
 }
 
@@ -146,8 +209,13 @@ func (s *Settings) Load(ctx context.Context) error {
 	}
 	cur := DefaultSettings()
 	for _, r := range rows {
-		if r.Section == "auth" {
+		switch r.Section {
+		case "auth":
 			if err := json.Unmarshal(r.Document, &cur.Auth); err != nil {
+				return fmt.Errorf("settings section %s: %w", r.Section, err)
+			}
+		case "ads":
+			if err := json.Unmarshal(r.Document, &cur.Ads); err != nil {
 				return fmt.Errorf("settings section %s: %w", r.Section, err)
 			}
 		}
@@ -163,9 +231,16 @@ func (s *Settings) Update(ctx context.Context, next PlatformSettings, by string)
 	if errs := next.Validate(); len(errs) > 0 {
 		return errs
 	}
-	doc, err := json.Marshal(next.Auth)
+	authDoc, err := json.Marshal(next.Auth)
 	if err == nil {
-		err = s.q.UpsertPlatformSetting(ctx, tenantdb.UpsertPlatformSettingParams{Section: "auth", Document: doc, UpdatedBy: nullString(by)})
+		err = s.q.UpsertPlatformSetting(ctx, tenantdb.UpsertPlatformSettingParams{Section: "auth", Document: authDoc, UpdatedBy: nullString(by)})
+	}
+	if err != nil {
+		return []platform.FieldError{{Path: "", Code: "storage", Message: err.Error()}}
+	}
+	adsDoc, err := json.Marshal(next.Ads)
+	if err == nil {
+		err = s.q.UpsertPlatformSetting(ctx, tenantdb.UpsertPlatformSettingParams{Section: "ads", Document: adsDoc, UpdatedBy: nullString(by)})
 	}
 	if err != nil {
 		return []platform.FieldError{{Path: "", Code: "storage", Message: err.Error()}}
@@ -173,7 +248,7 @@ func (s *Settings) Update(ctx context.Context, next PlatformSettings, by string)
 	s.mu.Lock()
 	s.cur = next
 	s.mu.Unlock()
-	if err := s.rdb.Publish(ctx, ChannelSettingsChanged, "auth").Err(); err != nil {
+	if err := s.rdb.Publish(ctx, ChannelSettingsChanged, "all").Err(); err != nil {
 		s.log.Warn("publish settings change", "err", err)
 	}
 	return nil

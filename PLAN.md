@@ -9,20 +9,33 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M7 is done** (M0–M6 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M8 is done** (M0–M7 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M8 verification (2026-10-27, same laptop, dev stack):
+
+| Check | Result |
+|---|---|
+| Golden test & organic preservation | `TestExplainTraceGolden` matches `testdata/explain_trace.golden.json` byte-for-byte (unchanged by M8); `TestAdsGoldenAndOrganicPreservation` checks the organic order is identical with ads disabled, and the sponsored slot, organic dedup and order with ads enabled. `TestBlendHonorsEverySlot` covers several slots (fixed 2026-10-27: removing a later winner's organic copy used to shift an earlier ad out of its slot) |
+| Personalization & BYO re-ranker | S6 adds `α·affinity + β·price_band_match` to the S5 score, or a BYO `kserve_v2` re-ranker (breaker, fallback) replaces it; both re-order only the candidates S5 ranked, so the tail keeps its pre-rank and RRF order (R4; fixed 2026-10-27, they used to sort the whole list across score scales) |
+| Diversity | Greedy `max_per_vendor` per sliding window of `window` results, keeping score order among compliant items (fixed 2026-10-27: the window counted one result too many, and the pass copied candidates quadratically) |
+| Ads auction & pacing | `internal/ads`: eligible ads are ranked candidates (S5/S6) matching targeting, above `relevance_floor` (S5 score min-max normalized among them), admitted by pacing (once per campaign per request); quality `0.6·rel + 0.4·pCTR`; GSP `min(bid, max(reserve, ⌈b₂q₂/q₁⌉ + 1))` with the tenant's `reserve_cpc_minor`; pacing throttles probabilistically against a uniform hourly spend curve in Redis. Sponsored clicks are charged once per placement at the recorded clearing price, which becomes the click's `value_minor` (fixed 2026-10-27: resent clicks were charged again, a client-sent value was kept, and shadow runs overwrote live clearing prices) |
+| Admin ad controls | `platform_settings.ads` in `api/openapi/control.yaml` and control-api settings; config validation enforces `max_slots`, `min_relevance_floor` and the `reserve_bounds` on `reserve_cpc_minor`; bids below the minimum reserve are refused (enforcement added 2026-10-27) |
+| Dataset & seeding | Deterministic `data/campaigns.jsonl` (300 campaigns with vendor targeting and creatives) from `tools/dataprep/synthesize.py` (byte-identical across runs), seeded into MySQL `ad_campaigns` and `ad_creatives` by `cmd/seed` |
+| ClickHouse ads reports | `GET /v1/tenants/{tid}/ads/reports?from&to`: sponsored impressions, clicks, spend and CTR per campaign, attributed through each product's creative across all campaign statuses (fixed 2026-10-27: every product with events used to appear as its own "campaign") |
+| Tests & lint | Unit (`-race`) and integration (`-p 1 -race`, 36 packages) pass after the 2026-10-27 fixes (before them `TestControlPlane` and `TestLearnedScorersAndPolicies` failed on M8 changes, and `TestBYOControlPlane` had failed since M7); `golangci-lint` 0 issues; Redocly clean for both specs; TS client in sync; pytest and ruff clean |
 
 M7 verification (2026-10-26, same laptop, dev stack with Triton):
 
 | Check | Result |
 |---|---|
-| Offline eval (nDCG@10) | Held-out test set (2,000 requests, graded: order 3, cart 2, click 1): **`rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain)**, MRR 0.7006 vs 0.5293; **`prerank-gbdt-v1` nDCG@10 0.3348 vs `default_linear` 0.2563 (+0.0641 gain)**, MRR 0.6607 vs 0.5231. Position-debiased (IPW): `rank-gbdt-v1` +0.0243, `prerank-gbdt-v1` +0.0195. Report: `tools/eval/reports/2026-10-26_ranking.md` |
+| Offline eval (nDCG@10) | Held-out test set (2,000 requests, graded: order 3, cart 2, click 1): **`rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain)**, MRR 0.7006 vs 0.5293; **`prerank-gbdt-v1` nDCG@10 0.3348 vs `default_linear` 0.2563 (+0.0785 gain)**, MRR 0.6607 vs 0.5231. Position-debiased (IPW): `rank-gbdt-v1` +0.0243, `prerank-gbdt-v1` +0.0313. Report: `tools/eval/reports/2026-10-26_ranking.md` |
 | Latency / stage budgets | `prerank-gbdt-v1` capped at 120 trees (115 trees selected) takes **3.90 ms** for 2,000 candidates on 1 ORT thread, fitting the 5 ms stage budget (**D69**); `rank-gbdt-v1` (329 trees) takes **1.6 ms** for 50 candidates in-process and ~2 ms via Triton remote KServe v2 |
 | Feature catalog & replay | Dataset builder `featurejob dataset` replayed 1,000,000 impressions / 20,000 requests through Go serving S1/S2 and S4 feature builder (**D68**), training period online features aggregated as of training cutoff to eliminate leak; LightGBM lambdarank models exported to ONNX via onnxmltools with float32 inputs matching catalog schema |
 | Scorer providers | In-process ORT scorer (`providers/scorer/onnx`) with thread tuning (`ONNX_INTRA_OP_THREADS`) and shared session cache; remote KServe v2 scorer (`providers/scorer/kservev2`) supporting Triton `rank_gbdt_v1` with raw and typed tensor formats; registry dynamic factory in `registry/scorers.go` |
 | Model upload & dry-run | Presigned upload URL (`POST /v1/tenants/{tid}/models/uploads`), registration (`POST /models`) with ONNX dry-run against declared feature schema, sha256 validation; Triton model repository sync in `cmd/featurejob publish` (**D70**) |
-| CEL policy engine | `providers/policy` with cel-go restricted env (`item`, `query`), cost limit (1000), AST validation; S3 filter stage evaluates rules concurrently across CPUs with deadline checks and fails open (**D63**–**D65**); `policy_boost` clamped to [-1, 1] applied additively to model output (**D66**) |
+| CEL policy engine | `providers/policy` with cel-go restricted env (`item`, `query`), cost limit (2000), AST validation; S3 filter stage evaluates rules concurrently across CPUs with deadline checks and fails open (**D63**–**D65**); `policy_boost` clamped to [-1, 1] applied additively to model output (**D66**) |
 | Live search & explain trace | Query "office chair" with `explain: true` verified S3 filter evaluating CEL policy (3.8 ms), S4 prerank using `platform:prerank-gbdt-v1` (1.7 ms), and S5 rank using `platform:rank-gbdt-v1` (1.6 ms) with 22 features and `policy_boost` applied |
-| Tests & coverage | Go unit tests (`-race`) and integration tests (`-p 1 -race`) pass; pytest clean (11 passed); `make cover` **86.4%** (pipeline 88.0%, stages 94.7%, tenant 83.7%, security 80.8%); `make lint` 0 issues; Redocly clean for `search.yaml` and `control.yaml`; web app typecheck and lint pass |
+| Tests & coverage | Go unit tests (`-race`) and integration tests (`-p 1 -race`) pass (the featurejob integration test's `events.NewProducer` call was fixed on 2026-10-27; it did not compile before); pytest clean (11 passed); `make cover` **86.4%** (pipeline 88.0%, stages 94.7%, tenant 83.7%, security 80.8%); `make lint` 0 issues; Redocly clean for `search.yaml` and `control.yaml`; web app typecheck and lint pass |
 
 M6 verification (2026-10-26, same laptop, dev stack with Triton):
 
@@ -183,7 +196,7 @@ M0 verification:
 | D66 | Learned scorers: `{type, model}` names a platform scorer, `{type, model_id}` a tenant's registered model; `policy_boost` is added to a learned model's output instead of being an input; a scorer that cannot load or fails falls back to the stage's input order and is rebuilt after 30 s | Models are trained without tenant rules, so boosts must stay effective after retraining; a model outage must not 503 search |
 | D67 | Request log: search-api writes one record per served page to `search.requests.v1` → ClickHouse `search_requests` (180-day TTL); the simulator writes the same log for its sessions | Training needs each request's query, which impression events do not carry; real tenants' traffic gets the same training path |
 | D68 | The dataset is built by the Go serving code (`featurejob dataset`): each logged query is replayed through S1/S2 restricted to its impressed products, S4's feature builder runs, item features are aggregated as of the end of the training period, vendor features are current | No train/serve feature skew from a second implementation; no leakage of evaluation-period clicks into features. RRF ranks are within the restricted set (documented skew) |
-| D69 | Pre-rank is capped at 120 trees (200 took 7.4 ms for 2,000 candidates, over the 5 ms budget); learning rates are picked from a small grid by validation nDCG@10; the report evaluates all test requests and, separately, the randomized ones (unbiased) | Spec bound beats the tree cap; the test split is only used for reporting; logged clicks are position-biased |
+| D69 | Pre-rank is capped at 120 trees (200 took 7.4 ms for 2,000 candidates, over the 5 ms budget); learning rates are picked from a small grid by validation nDCG@10; the report evaluates all test requests and, separately, with inverse propensity weights (position-debiased); each model is compared with `default_linear` at its own stage | Spec bound beats the tree cap; the test split is only used for reporting; logged clicks are position-biased |
 | D70 | Platform scorers live in the models bucket (`platform/<id>/model.onnx` + `features.json` with sha256); `featurejob publish` uploads them and writes Triton's `rank_gbdt_v1` (restart Triton to load); tenant uploads go to `tenants/<tid>/models/<upload>.onnx` and their sha256 is checked on every load | One artifact store for platform and tenant models; integrity checked end to end |
 | D71 | Services are built with cgo and ship ONNX Runtime in a distroless `cc` image; the runtime is initialized once per process; without it ONNX uploads are refused (503) and ONNX scorers fall back | onnxruntime_go loads the library with dlopen; ORT's environment is process-global by design |
 | D11 | ABO is **CC BY 4.0**, not CC BY-NC as `docs/DATA.md` said | The official page and README were checked on 2026-10-25. `docs/DATA.md` and `ATTRIBUTION.md` are corrected. It is still used for demo and eval data only. |
@@ -453,7 +466,7 @@ New deps: none (`clickhouse-go/v2` moved into featurejob). Test image: `clickhou
 
 ## M7 — Learned ranking and CEL policies ✅
 
-**Done when:** nDCG@10 on the held-out set beats `default_linear`. **Met: `rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain); `prerank-gbdt-v1` 0.3348 vs 0.2563 (+0.0641 gain) on held-out test split (see §0).**
+**Done when:** nDCG@10 on the held-out set beats `default_linear`. **Met: `rank-gbdt-v1` nDCG@10 0.3583 vs `default_linear` 0.2708 (+0.0875 gain); `prerank-gbdt-v1` 0.3348 vs 0.2563 (+0.0785 gain) on held-out test split (see §0).**
 
 - [x] `tools/training`: ClickHouse dataset (graded labels order=3, cart=2, click=1), time split 80/10/10, LightGBM lambdarank prerank (≤ 15 features, ≤ 200 trees) and rank → ONNX via onnxmltools plus `.features.json`; metrics report (**D67**–**D69**)
 - [x] Feature builder for the catalog in `docs/MODELS.md` §4 (ordered schema, declared defaults) (`internal/pipeline/feature/`)
@@ -471,12 +484,14 @@ Carried forward: exploration traffic slots served by search-api (impressions it 
 
 **Done when:** sponsored slots are honored, and organic ranking is unaffected when ads are disabled (golden test).
 
-- [ ] Personalization: `rank + α·affinity + β·price_band_match`; BYO re-ranker (KServe v2) replaces it
-- [ ] Diversity: greedy `max_per_vendor` per window
-- [ ] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, quality = relevance + smoothed pCTR, GSP with reserve CPC, probabilistic pacing in Redis, dedup against organic, `sponsored=true` (**R10**)
-- [ ] Admin ad controls (`platform_settings.ads`, per-plan overrides): tenant-editable campaign fields, sponsored display fields, max slots, minimum floor, reserve bounds (**R10**)
-- [ ] `data/campaigns.jsonl` (300) seeded; ads reports from ClickHouse
-- [ ] Golden test: ads disabled gives organic output identical to the pre-ads baseline
+- [x] Personalization: `rank + α·affinity + β·price_band_match`; BYO re-ranker (KServe v2) replaces it
+- [x] Diversity: greedy `max_per_vendor` per window
+- [x] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, quality = relevance + smoothed pCTR, GSP with reserve CPC, probabilistic pacing in Redis, dedup against organic, `sponsored=true` (**R10**)
+- [x] Admin ad controls (`platform_settings.ads`, per-plan overrides): tenant-editable campaign fields, sponsored display fields, max slots, minimum floor, reserve bounds (**R10**)
+- [x] `data/campaigns.jsonl` (300) seeded; ads reports from ClickHouse
+- [x] Golden test: ads disabled gives organic output identical to the pre-ads baseline
+
+Carried forward (R10 parts not built yet): enforcing the admin's `tenant_fields` on campaign reads and edits; the sponsored disclosure (label, vendor name, link) in search responses; `per_plan` overrides (stored, not applied); tenant-tunable `ads.quality` weights; pCTR from position-debiased ad CTR with impression counts (today the item's organic `ctr_30d`, smoothed toward 2%); cosine relevance for image queries; a `campaign_id` on events, so reports need not attribute by product.
 
 ---
 

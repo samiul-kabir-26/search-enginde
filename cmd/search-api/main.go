@@ -25,6 +25,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/zavisoft/search-engine/internal/ads"
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/catalog/centroids"
 	"github.com/zavisoft/search-engine/internal/events"
@@ -191,9 +192,13 @@ func run(ctx context.Context) error {
 		return err
 	}
 	featureStore := features.New(rdb)
+	adsStore := ads.NewDBStore(tenantdb.New(db), 30*time.Second)
+	adsPacing := ads.NewRedisPacing(rdb)
+	adsBlender := ads.NewBlender(adsStore, adsPacing)
+	rerankStage := rerank.New(rerank.WithBreakers(breakers), rerank.WithBlender(adsBlender))
 	engine, err := pipeline.NewEngine(meter,
 		queryunderstanding.New(breakers), retrieval.New(breakers), filter.New(breakers, featureStore),
-		prerank.New(breakers, featureStore), rank.New(breakers), rerank.New())
+		prerank.New(breakers, featureStore), rank.New(breakers), rerankStage)
 	if err != nil {
 		return err
 	}
@@ -252,6 +257,7 @@ func run(ctx context.Context) error {
 		Limiter:   redis_rate.NewLimiter(rdb),
 		Events:    producer,
 		Vendors:   featureStore,
+		AdsPacing: adsPacing,
 		Log:       log,
 	}
 

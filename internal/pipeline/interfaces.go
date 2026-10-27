@@ -248,6 +248,7 @@ type Providers struct {
 	Centroids CentroidIndex
 	Prerank   Scorer
 	Rank      Scorer
+	Rerank    Scorer
 	// Policy is nil when the config has no CEL rules.
 	Policy       PolicyEngine
 	IndexVersion int

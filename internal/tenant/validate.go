@@ -31,6 +31,16 @@ type ValidationDeps struct {
 	// PlatformScorer describes a platform scorer model (docs/MODELS.md §2); it fails for
 	// unknown IDs and for models not trained yet.
 	PlatformScorer func(ctx context.Context, id string) (ScorerInfo, error)
+	// Ads are the platform admin's ad limits (platform_settings.ads); zero values impose none.
+	Ads AdsLimits
+}
+
+// AdsLimits bound a tenant's ads section (PLAN.md R10).
+type AdsLimits struct {
+	MaxSlots          int
+	MinRelevanceFloor float64
+	MinReserveMinor   int64
+	MaxReserveMinor   int64
 }
 
 // Limits on config values.
@@ -61,7 +71,8 @@ func (c *Config) Validate(ctx context.Context, deps ValidationDeps) []platform.F
 	c.validateFacets(&v, reg)
 	c.validatePolicy(&v, reg)
 	c.validateScorers(ctx, &v, deps)
-	c.validateAds(&v)
+	c.validateRerank(ctx, &v, deps)
+	c.validateAds(&v, deps.Ads)
 	return v.errs
 }
 
@@ -427,14 +438,52 @@ func (c *Config) validateLearned(ctx context.Context, v *validator, deps Validat
 		switch src, ok := cat[f]; {
 		case !ok:
 			v.fail(field, "unknown_feature", "the model's feature %q is not in the feature catalog", f)
-		case src == feature.SourceUser:
+		case src == feature.SourceUser && kind != ModelKindRerank:
 			v.fail(field, "unavailable", "the model uses %q; user features are only available to the re-ranker", f)
 		}
 	}
 }
 
-func (c *Config) validateAds(v *validator) {
+func (c *Config) validateRerank(ctx context.Context, v *validator, deps ValidationDeps) {
+	if c.Rerank.Model != nil && (c.Rerank.Model.Type != "" || c.Rerank.Model.ModelID != "") {
+		m := *c.Rerank.Model
+		if m.Type != ScorerKServeV2 {
+			v.fail("/rerank/model/type", "invalid", "re-ranker models must be kserve_v2")
+		}
+		c.validateLearned(ctx, v, deps, "/rerank", ModelKindRerank, m)
+	}
+	if p := c.Rerank.Personalization; p != nil && p.Enabled {
+		if p.Alpha < 0 || p.Alpha > 5 {
+			v.fail("/rerank/personalization/alpha", "out_of_range", "alpha must be within [0, 5]")
+		}
+		if p.Beta < 0 || p.Beta > 5 {
+			v.fail("/rerank/personalization/beta", "out_of_range", "beta must be within [0, 5]")
+		}
+	}
+	if d := c.Rerank.Diversity; d != nil {
+		if d.MaxPerVendor < 0 {
+			v.fail("/rerank/diversity/max_per_vendor", "out_of_range", "max_per_vendor must be >= 0")
+		}
+		if d.Window < 0 {
+			v.fail("/rerank/diversity/window", "out_of_range", "window must be >= 0")
+		}
+		if d.MaxPerVendor > 0 && d.Window > 0 && d.Window < d.MaxPerVendor {
+			v.fail("/rerank/diversity/window", "out_of_range", "window must be >= max_per_vendor")
+		}
+	}
+}
+
+func (c *Config) validateAds(v *validator, lim AdsLimits) {
 	a := c.Ads
+	if lim.MaxSlots > 0 && len(a.Slots) > lim.MaxSlots {
+		v.fail("/ads/slots", "out_of_range", "at most %d ad slots are allowed", lim.MaxSlots)
+	}
+	if a.Enabled && a.RelevanceFloor < lim.MinRelevanceFloor {
+		v.fail("/ads/relevance_floor", "out_of_range", "relevance_floor must be at least the platform minimum %g", lim.MinRelevanceFloor)
+	}
+	if r := a.ReserveCPCMinor; r < 0 || (r > 0 && (r < lim.MinReserveMinor || (lim.MaxReserveMinor > 0 && r > lim.MaxReserveMinor))) {
+		v.fail("/ads/reserve_cpc_minor", "out_of_range", "reserve_cpc_minor must be within the platform's reserve bounds [%d, %d]", lim.MinReserveMinor, lim.MaxReserveMinor)
+	}
 	if !slices.IsSorted(a.Slots) || len(slices.Compact(slices.Clone(a.Slots))) != len(a.Slots) {
 		v.fail("/ads/slots", "invalid", "slots must be strictly increasing")
 	}
