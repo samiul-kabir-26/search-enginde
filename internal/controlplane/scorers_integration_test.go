@@ -223,4 +223,35 @@ func TestLearnedScorersAndPolicies(t *testing.T) {
 			t.Errorf("rules are enforced now: %s", ok.raw)
 		}
 	})
+
+	t.Run("policy test against samples", func(t *testing.T) {
+		item := func(id string, price int) map[string]any {
+			return map[string]any{"id": id, "name": "Bag " + id, "category": map[string]any{"path": []string{"Bags"}},
+				"price": map[string]any{"amount_minor": price, "currency": "USD"}, "vendor": map[string]any{"id": "v1"},
+				"images": []map[string]string{{"url": "http://img/" + id + ".jpg"}}}
+		}
+		r := owner.expect(http.StatusOK, owner.do("POST", base+"/policy/test", map[string]any{
+			"samples": []any{item("cheap", 500), item("dear", 9000), map[string]any{"id": "broken"}},
+			"rules": []map[string]string{
+				{"id": "under-50", "kind": "filter", "expr": "item.price_minor < 5000"},
+				{"id": "rated", "kind": "boost", "expr": "has(item.rating) ? 0.5 : 0.0"},
+				{"id": "typo", "kind": "filter", "expr": "item.prise < 1"},
+			}}), "policy test")
+		rules := r.body["rules"].([]any)
+		filterRes := rules[0].(map[string]any)["results"].([]any)
+		if k0, k1 := filterRes[0].(map[string]any)["keep"], filterRes[1].(map[string]any)["keep"]; k0 != true || k1 != false {
+			t.Errorf("under-50 keep = %v, %v; want true, false (%s)", k0, k1, r.raw)
+		}
+		if filterRes[2].(map[string]any)["mapping_error"] != true {
+			t.Errorf("an unmappable sample must be flagged: %s", r.raw)
+		}
+		if b := rules[1].(map[string]any)["results"].([]any)[0].(map[string]any)["boost"]; b != 0.0 {
+			t.Errorf("boost without a rating = %v, want 0", b)
+		}
+		typo := rules[2].(map[string]any)
+		if errs, _ := typo["errors"].([]any); len(errs) == 0 || len(typo["results"].([]any)) != 0 {
+			t.Errorf("a rule that does not compile reports errors and no results: %s", r.raw)
+		}
+		owner.expect(http.StatusBadRequest, owner.do("POST", base+"/policy/test", map[string]any{"rules": []any{}, "samples": []any{}}), "empty")
+	})
 }

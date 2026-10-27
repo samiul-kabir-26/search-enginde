@@ -24,6 +24,7 @@ const UploadURLTTL = 15 * time.Minute
 
 func (s *Server) catalogRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /v1/tenants/{tid}/catalog/mapping/preview", s.tenantRoute(auth.ScopeTenantRead, s.handleMappingPreview))
+	mux.Handle("POST /v1/tenants/{tid}/policy/test", s.tenantRoute(auth.ScopeTenantRead, s.handlePolicyTest))
 	mux.Handle("POST /v1/tenants/{tid}/catalog/uploads", s.tenantRoute(auth.ScopeTenantWrite, s.tenantIdem(s.handleUpload).ServeHTTP))
 	mux.Handle("POST /v1/tenants/{tid}/index/jobs", s.tenantRoute(auth.ScopeTenantWrite, s.tenantIdem(s.handleCreateJob).ServeHTTP))
 	mux.Handle("GET /v1/tenants/{tid}/index/jobs", s.tenantRoute(auth.ScopeTenantRead, s.handleListJobs))

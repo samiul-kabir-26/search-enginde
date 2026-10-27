@@ -785,6 +785,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/tenants/{tid}/policy/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Evaluate CEL rules against sample products
+         * @description Maps each sample with the draft's field_mapping and custom fields, then compiles each rule on its own (docs/TENANT_CONFIG.md §5 rule 7) and evaluates it against every mapped sample, as S3 would (vendor fields at their declared defaults). Nothing is saved.
+         */
+        post: operations["testPolicyRules"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/tenants/{tid}/catalog/mapping/preview": {
         parameters: {
             query?: never;
@@ -1403,6 +1423,39 @@ export interface components {
                     [key: string]: unknown;
                 };
                 errors?: components["schemas"]["FieldError"][];
+            }[];
+        };
+        PolicyTestRequest: {
+            rules: {
+                id: string;
+                /** @enum {string} */
+                kind: "filter" | "boost";
+                expr: string;
+            }[];
+            /** @description Products in the tenant's own catalog shape */
+            samples: {
+                [key: string]: unknown;
+            }[];
+            /** @description Optional query text, for rules that read query.text */
+            query?: string;
+        };
+        PolicyTestResponse: {
+            rules: {
+                id: string;
+                kind: string;
+                /** @description Compile errors; when present the rule was not evaluated */
+                errors?: components["schemas"]["FieldError"][];
+                results: {
+                    product_id: string;
+                    /** @description Filter rules: true keeps the product */
+                    keep?: boolean;
+                    /** @description Boost rules, clamped to [-1, 1] */
+                    boost?: number;
+                    /** @description The rule errored on this product (it would keep it and add nothing) */
+                    failed?: boolean;
+                    /** @description The sample did not map, so the rule was not evaluated */
+                    mapping_error?: boolean;
+                }[];
             }[];
         };
         CampaignInput: {
@@ -3029,6 +3082,33 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresignedUpload"];
+                };
+            };
+            "4XX": components["responses"]["Problem"];
+        };
+    };
+    testPolicyRules: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyTestRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyTestResponse"];
                 };
             };
             "4XX": components["responses"]["Problem"];

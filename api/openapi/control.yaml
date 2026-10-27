@@ -1111,6 +1111,31 @@ paths:
             application/json:
               schema: {$ref: '#/components/schemas/PresignedUpload'}
         4XX: *id002
+  /v1/tenants/{tid}/policy/test:
+    post:
+      operationId: testPolicyRules
+      tags: [onboarding]
+      summary: Evaluate CEL rules against sample products
+      description: Maps each sample with the draft's field_mapping and custom fields, then compiles each rule on its own
+        (docs/TENANT_CONFIG.md §5 rule 7) and evaluates it against every mapped sample, as S3 would (vendor fields at
+        their declared defaults). Nothing is saved.
+      parameters:
+      - name: tid
+        in: path
+        required: true
+        schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PolicyTestRequest'}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PolicyTestResponse'}
+        4XX: {$ref: '#/components/responses/Problem'}
   /v1/tenants/{tid}/catalog/mapping/preview:
     post:
       operationId: previewCatalogMapping
@@ -1968,6 +1993,56 @@ components:
               errors: *id005
             required: [product]
       required: [results]
+    PolicyTestRequest:
+      type: object
+      properties:
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              kind: {type: string, enum: [filter, boost]}
+              expr: {type: string}
+            required: [id, kind, expr]
+        samples:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: {type: object, additionalProperties: true}
+          description: Products in the tenant's own catalog shape
+        query: {type: string, description: 'Optional query text, for rules that read query.text'}
+      required: [rules, samples]
+      additionalProperties: false
+    PolicyTestResponse:
+      type: object
+      properties:
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              kind: {type: string}
+              errors:
+                type: array
+                items: {$ref: '#/components/schemas/FieldError'}
+                description: Compile errors; when present the rule was not evaluated
+              results:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    product_id: {type: string}
+                    keep: {type: boolean, description: 'Filter rules: true keeps the product'}
+                    boost: {type: number, description: 'Boost rules, clamped to [-1, 1]'}
+                    failed: {type: boolean, description: 'The rule errored on this product (it would keep it and add nothing)'}
+                    mapping_error: {type: boolean, description: 'The sample did not map, so the rule was not evaluated'}
+                  required: [product_id]
+            required: [id, kind, results]
+      required: [rules]
     CampaignInput:
       type: object
       properties:

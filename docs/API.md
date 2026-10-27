@@ -195,6 +195,7 @@ All need a plan with BYO providers (403 `plan_forbids_byo` otherwise). Reads nee
 | GET | `/v1/tenants/{tid}/index/jobs/{id}` | `status` (`queued`, `running`, `succeeded`, `failed`), `total`, `done`, `failed`, `index_version`, `error` |
 | POST | `/v1/tenants/{tid}/catalog/uploads` | Body `{format: "jsonl"}` → `{upload_id, method: PUT, url, headers, expires_at}` (15 min). One tenant product JSON per line, in the tenant's own shape (mapped by `catalog.field_mapping`) |
 | POST | `/v1/tenants/{tid}/catalog/mapping/preview` | Body `{field_mapping, custom_fields?, samples}` (1–20 samples) → `{results: [{product, errors}]}`; nothing is stored |
+| POST | `/v1/tenants/{tid}/policy/test` | Body `{rules, samples, query?}` (1–50 rules, 1–20 samples in the tenant's shape) → `{rules: [{id, kind, errors?, results: [{product_id, keep?, boost?, failed?, mapping_error?}]}]}`. Each rule compiles on its own (`docs/TENANT_CONFIG.md` §5 rule 7) and runs on the samples mapped with the draft's catalog mapping, as S3 would; vendor fields are the declared defaults; nothing is stored |
 
 ### Ads
 

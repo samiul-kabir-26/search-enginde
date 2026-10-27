@@ -90,7 +90,7 @@ Each step is `PUT /v1/tenants/{tid}/onboarding/steps/{step}` with a strict JSON 
 | `engine_tour`, `playground` | `{}` | Recorded only |
 | `catalog` | `{ingestion: "events"\|"upload", field_mapping, custom_fields?, vendor_mapping?, samples}` | The mandatory catalog fields plus `vendor_id` and `image_urls` must be mapped; 1–20 samples must map without errors (same engine as `catalog/mapping/preview`); `vendor_mapping` follows `docs/TENANT_CONFIG.md` §5 rule 15 |
 | `retrieval` | `{preset?: "balanced"\|"keyword"\|"semantic"\|"visual", embedders?, stores?}` | Presets set the retriever mix and weights. BYO embedders and vector stores reference models and connections registered and validated first (`POST /models` + `/validate`, `POST /connections` + `/test`); the step runs the live checks of `docs/TENANT_CONFIG.md` §5 rules 3–6. The lexical index stays platform-hosted |
-| `policies` | `{in_stock?, ship_to_region?, verified_vendors?, rules?}` | Toggles become `policy.always_filters` (`verified_vendors` adds the CEL filter `item.vendor.verified` after the tenant's rules). CEL `rules` compile with the draft (`docs/TENANT_CONFIG.md` §5 rule 7); errors block the step at `/policy/rules/{i}/...` |
+| `policies` | `{in_stock?, ship_to_region?, verified_vendors?, rules?}` | Toggles become `policy.always_filters` (`verified_vendors` adds the CEL filter `item.vendor.verified` after the tenant's rules). CEL `rules` compile with the draft (`docs/TENANT_CONFIG.md` §5 rule 7); errors block the step at `/policy/rules/{i}/...`. **Test against sample products** calls `POST /policy/test` with the catalog step's samples (M9) |
 | `ranking` | `{mode?: "default"\|"learned"\|"byo", weights?, prerank_model_id?, rank_model_id?}` | `default`: `default_linear` in both stages, weights override the rank stage. `learned`: the platform models (`onnx` `prerank-gbdt-v1`, `kserve_v2` `rank-gbdt-v1`); `not_available` until they are trained. `byo`: the tenant's registered scorer models for either or both stages (the other keeps `default_linear`); kind, type, status and features are validated (`docs/TENANT_CONFIG.md` §5 rule 9) |
 | `personalization` | `{personalization?, diversity?, ads?}` | The config sections of the same names, with the range rules from `docs/TENANT_CONFIG.md` §5 |
 | `index_build` | `{upload_id?}` | Publishes the draft (full validation) and queues an index job; `data` is `{version, job}`. Poll `GET /index/jobs/{id}` |
@@ -113,6 +113,15 @@ Each step is `PUT /v1/tenants/{tid}/onboarding/steps/{step}` with a strict JSON 
 **Behavior**
 - Forms are validated client-side for UX and server-side as authority; server `errors[].path` values map to fields.
 - Accessibility: labels on all inputs; focus management on step change; the progress announcement is an `aria-live="polite"` region.
+
+**As implemented (M9)**
+- Session: Server Actions and Route Handlers keep three httpOnly cookies: `se_at` (the access token, for its lifetime), `se_rt` (control-api's rotating refresh token, relayed from its `se_refresh` Set-Cookie) and `se_tid`. An expired access token is refreshed in place by actions and handlers; Server Components, which cannot store a rotated token, go through `/auth/refresh?next=…`. The platform admin uses `se_admin_at` and signs in again when it expires.
+- With `cacheComponents`, every page that reads the session renders that part behind `<Suspense>`, and the onboarding and admin layouts set `instant = false`.
+- Route Handlers: `POST /api/catalog/upload` (JSONL: presign, PUT to storage from the server, remember the upload for the index build, return the first 20 products as samples), `POST /api/models/upload` (ONNX scorers) and `POST /api/playground/image` (multipart proxy). Everything else is a Server Action.
+- Catalog samples are test data, not config: they stay in the browser tab (`sessionStorage`, in memory when unavailable) for the policies step's rule tests.
+- The playground compares the chosen version side by side with the draft or another published version; the platform defaults have no version of their own to search.
+- `/admin` (platform admin): settings, ad controls, plans, signing keys (rotate, revoke retired) and tenants.
+- E2E: `make e2e` (Playwright; `npx playwright install chromium` once). It needs the dev stack with Triton, control-api, search-api and the indexer running, and `make seed` once for the demo images the test catalog points at.
 
 ## 6. Acceptance test (M9)
 

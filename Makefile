@@ -168,6 +168,14 @@ run-control-api: .env ## Run control-api locally against the Compose stack
 run-indexer: .env ## Run the streaming indexer (consumer group) against the Compose stack
 	@$(ENV_LOAD) go run ./cmd/indexer
 
+.PHONY: run-web
+run-web: ## Run the onboarding wizard and admin console (Next.js) on :3000
+	cd web/onboarding && npm run dev
+
+.PHONY: e2e
+e2e: ## Playwright onboarding and admin E2E (needs the stack, run-* services and `make seed`; `npx playwright install chromium` once)
+	cd web/onboarding && npm run test:e2e
+
 .PHONY: centroids
 centroids: .env ## Rebuild category centroids for a tenant's active index (TENANT=demo)
 	@$(ENV_LOAD) go run ./cmd/featurejob centroids -tenant $(or $(TENANT),demo)

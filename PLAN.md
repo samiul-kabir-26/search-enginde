@@ -9,7 +9,18 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M8 is done** (M0–M7 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M9 is done** (M0–M8 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M9 verification (2026-10-27, same laptop, dev stack with Triton; control-api, search-api and indexer from `make run-*`):
+
+| Check | Result |
+|---|---|
+| Acceptance: sign-up to live playground | Playwright `e2e/onboarding.spec.ts` (docs/ONBOARDING.md §6): signs up a tenant, opens a stage in the engine tour, uploads 100 products as JSONL (storefront shape, demo images), keeps the mapping and retrieval defaults, adds a CEL filter and tests it on the samples (keeps 20 of 20), publishes and builds (index job polled to `succeeded`), runs a text and an image search with results and the explain trace, verifies the email through Mailpit and activates version 1 (API key shown once). Passes twice in a row (37 s, 25 s) |
+| Guard and errors | A step ahead of `current_step` redirects to it; a taken slug comes back as a 409 at `/slug` and marks that input `aria-invalid`, keeping what was typed |
+| Admin flow | `e2e/admin.spec.ts`: admin login, an out-of-range password length is refused at its field, valid settings and ad controls save and persist across reload (then restored); plans, signing keys and tenants render |
+| Policy test endpoint | New `POST /v1/tenants/{tid}/policy/test` (OpenAPI first, TS client regenerated): each rule compiles alone and runs on the samples mapped with the draft's mapping, as S3 would; integration subtest covers keep, boost, unmappable samples and compile errors |
+| Static checks | `next build` (Cache Components, partial prerendering), `tsc`, ESLint clean; Go build/vet (both tag sets), golangci-lint 0 issues, unit tests (`-race`) pass; Redocly clean for both specs |
+| Found while testing | The access token's `ev` claim is stale after the user verifies, so go-live refreshes the session and retries once; the first searches after a search-api restart can time out (D38), visible in the explain trace, so the E2E retries them |
 
 M8 verification (2026-10-27, same laptop, dev stack):
 
@@ -495,16 +506,18 @@ Carried forward (R10 parts not built yet): enforcing the admin's `tenant_fields`
 
 ---
 
-## M9 — Onboarding wizard
+## M9 — Onboarding wizard ✅
 
 **Done when:** a new tenant goes from sign-up to a live search playground end to end.
 
-- [ ] Session as an httpOnly secure cookie; all control-api calls through Route Handlers and Server Actions
-- [ ] `/onboarding/[step]` with a step guard; Server Components for data, client components for interactive pieces
-- [ ] Components: `Stepper`, `EngineDiagram` (accessible, mobile-first SVG), `StagePanel`, `ProviderChooser`, `ConnectionForm`, `ModelRegistrationForm`, `JsonPathMapper`, `CelEditor`, `WeightSliders`, `SlotPicker`, `IndexProgress`, `PlaygroundSearch`, `ExplainTrace`
-- [ ] Server `errors[].path` mapped to fields; focus management; `aria-live` progress
-- [ ] `/admin` (platform admin): settings, plans, signing keys, ad controls, tenants (**R7**, **R10**)
-- [ ] Playwright E2E per `docs/ONBOARDING.md` §6 plus an admin settings flow (`npx playwright install chromium` first)
+- [x] Session as an httpOnly secure cookie; all control-api calls through Route Handlers and Server Actions
+- [x] `/onboarding/[step]` with a step guard; Server Components for data, client components for interactive pieces
+- [x] Components: `Stepper`, `EngineDiagram` (accessible, mobile-first SVG), `StagePanel`, `ProviderChooser`, `ConnectionForm`, `ModelRegistrationForm`, `JsonPathMapper`, `CelEditor`, `WeightSliders`, `SlotPicker`, `IndexProgress`, `PlaygroundSearch`, `ExplainTrace`
+- [x] Server `errors[].path` mapped to fields; focus management; `aria-live` progress
+- [x] `/admin` (platform admin): settings, plans, signing keys, ad controls, tenants (**R7**, **R10**)
+- [x] Playwright E2E per `docs/ONBOARDING.md` §6 plus an admin settings flow (`npx playwright install chromium` first; `make e2e`)
+
+Carried forward: the playground compares versions and the draft side by side, not "platform defaults" (they have no searchable version); the personalization step does not register a BYO re-ranker (set `rerank.model` through the config API); the admin session lasts one access-token lifetime (no refresh); sign-up sends no Idempotency-Key (Cache Components cannot prerender a client UUID; the button is disabled while pending); the search-api startup warm-up (D38) is still open.
 
 ---
 
