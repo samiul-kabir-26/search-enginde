@@ -1258,11 +1258,11 @@ export interface components {
          *     user features; policy_boost is added to the model's output unless listed). An onnx scorer takes the
          *     upload_id of POST /models/uploads: it is checked (≤ 200 MB, sha256 recorded) and dry-run on the declared
          *     defaults now, and is `validated` on success. A kserve_v2 scorer takes an endpoint and is validated by
-         *     POST /models/{id}/validate. Rerank models arrive with personalization (M8).
+         *     POST /models/{id}/validate. Re-ranker models (kind rerank) use kserve_v2 remote endpoints.
          */
         ModelInput: {
             /** @enum {string} */
-            kind: "embedder" | "prerank" | "rank";
+            kind: "embedder" | "prerank" | "rank" | "rerank";
             /** @enum {string} */
             type: "kserve_v2" | "openai_embeddings" | "onnx";
             /** @description onnx scorers only; from POST /models/uploads */
@@ -1583,6 +1583,25 @@ export interface components {
                 key_retention: string;
                 /** @description 1h to 7 days */
                 email_verification_ttl: string;
+            };
+            ads?: {
+                tenant_fields: string[];
+                disclosure: {
+                    label: string;
+                    vendor_name: boolean;
+                    disclosure_link: string;
+                };
+                max_slots: number;
+                min_relevance_floor: number;
+                reserve_bounds: {
+                    /** Format: int64 */
+                    min_minor: number;
+                    /** Format: int64 */
+                    max_minor: number;
+                };
+                per_plan?: {
+                    [key: string]: unknown;
+                };
             };
         };
         Plan: {

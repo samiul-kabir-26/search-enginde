@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -27,18 +28,20 @@ func TestSettingsValidate(t *testing.T) {
 	s.Auth.KeyRetention = Duration(time.Minute)
 	s.Auth.Password.MemoryKiB = 1024
 	s.Auth.PasswordMinLength = 4
+	s.Ads.MaxSlots = 0
+	s.Ads.MinRelevanceFloor = 2.0
 	paths := map[string]bool{}
 	for _, e := range s.Validate() {
 		paths[e.Path] = true
 	}
-	for _, p := range []string{"/auth/access_token_ttl", "/auth/key_retention", "/auth/password/memory_kib", "/auth/password_min_length"} {
+	for _, p := range []string{"/auth/access_token_ttl", "/auth/key_retention", "/auth/password/memory_kib", "/auth/password_min_length", "/ads/max_slots", "/ads/min_relevance_floor"} {
 		if !paths[p] {
 			t.Errorf("missing %s in %v", p, paths)
 		}
 	}
 	b, _ := json.Marshal(DefaultSettings())
 	var back PlatformSettings
-	if err := json.Unmarshal(b, &back); err != nil || back != DefaultSettings() {
+	if err := json.Unmarshal(b, &back); err != nil || !reflect.DeepEqual(back, DefaultSettings()) {
 		t.Errorf("settings must round-trip: %s %v", b, err)
 	}
 	var d Duration

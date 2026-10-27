@@ -37,7 +37,7 @@ const MaxScorerFeatures = 64
 
 // checkFeatures validates a scorer's declared feature schema (docs/TENANT_CONFIG.md §5 rule 9):
 // unique catalog features, no user features (re-rank only).
-func checkFeatures(path string, names []string) []platform.FieldError {
+func checkFeatures(path string, names []string, kind string) []platform.FieldError {
 	var errs []platform.FieldError
 	if len(names) == 0 || len(names) > MaxScorerFeatures {
 		errs = append(errs, fieldErr(path, "invalid", fmt.Sprintf("declare 1 to %d features, in the model's input order", MaxScorerFeatures)))
@@ -49,7 +49,7 @@ func checkFeatures(path string, names []string) []platform.FieldError {
 		switch {
 		case !ok:
 			errs = append(errs, fieldErr(p, "unknown_feature", fmt.Sprintf("%q is not in the feature catalog", n)))
-		case src == feature.SourceUser:
+		case src == feature.SourceUser && kind != tenant.ModelKindRerank:
 			errs = append(errs, fieldErr(p, "unavailable", "user features are only available to the re-ranker"))
 		case seen[n]:
 			errs = append(errs, fieldErr(p, "duplicate", fmt.Sprintf("%q is listed twice", n)))
@@ -71,9 +71,12 @@ type scorerRequest struct {
 func (s *Server) registerScorer(w http.ResponseWriter, r *http.Request, in scorerRequest) {
 	var errs []platform.FieldError
 	switch in.Kind {
-	case tenant.ModelKindPrerank, tenant.ModelKindRank:
-	case tenant.ModelKindRerank:
-		errs = append(errs, fieldErr("/kind", "not_available", "re-ranker models arrive with personalization (M8)"))
+	case tenant.ModelKindPrerank, tenant.ModelKindRank, tenant.ModelKindRerank:
+	default:
+		errs = append(errs, fieldErr("/kind", "invalid", "kind must be prerank, rank or rerank"))
+	}
+	if in.Kind == tenant.ModelKindRerank && in.Type != tenant.ModelKServeV2 {
+		errs = append(errs, fieldErr("/type", "invalid", "re-ranker models must be kserve_v2"))
 	}
 	if in.Name == "" || len(in.Name) > 255 {
 		errs = append(errs, fieldErr("/name", "invalid", "name must be 1 to 255 characters"))
@@ -81,7 +84,7 @@ func (s *Server) registerScorer(w http.ResponseWriter, r *http.Request, in score
 	if len(in.Version) > 64 {
 		errs = append(errs, fieldErr("/version", "invalid", "version must be at most 64 characters"))
 	}
-	errs = append(errs, checkFeatures("/input_schema/features", in.Features)...)
+	errs = append(errs, checkFeatures("/input_schema/features", in.Features, in.Kind)...)
 	switch in.Type {
 	case tenant.ModelONNX:
 		if _, err := ulid.ParseStrict(in.UploadID); err != nil {

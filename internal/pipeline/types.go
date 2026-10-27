@@ -20,6 +20,7 @@ const (
 // Query is a search request after S1: normalized text, extracted attributes, predicted
 // categories, embeddings and filters.
 type Query struct {
+	RequestID     string
 	Tenant        tenant.ID
 	ConfigVersion int
 	Type          QueryType

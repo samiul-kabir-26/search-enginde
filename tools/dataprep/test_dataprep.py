@@ -115,6 +115,7 @@ def test_same_seed_same_bytes(raw_dir: Path, tmp_path: Path) -> None:
         "products.raw.jsonl",
         "products.canonical.jsonl",
         "vendors.jsonl",
+        "campaigns.jsonl",
         "hidden/item_quality.jsonl",
         "eval/image_eval_seed.jsonl",
     ]:

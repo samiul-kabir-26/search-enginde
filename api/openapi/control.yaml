@@ -1795,11 +1795,11 @@ components:
         user features; policy_boost is added to the model's output unless listed). An onnx scorer takes the
         upload_id of POST /models/uploads: it is checked (≤ 200 MB, sha256 recorded) and dry-run on the declared
         defaults now, and is `validated` on success. A kserve_v2 scorer takes an endpoint and is validated by
-        POST /models/{id}/validate. Rerank models arrive with personalization (M8).
+        POST /models/{id}/validate. Re-ranker models (kind rerank) use kserve_v2 remote endpoints.
       properties:
         kind:
           type: string
-          enum: [embedder, prerank, rank]
+          enum: [embedder, prerank, rank, rerank]
         type:
           type: string
           enum: [kserve_v2, openai_embeddings, onnx]
@@ -2182,6 +2182,31 @@ components:
             email_verification_ttl: {type: string, description: 1h to 7 days}
           required: [password, password_min_length, access_token_ttl, refresh_token_ttl, api_token_ttl, key_rotation, key_retention,
             email_verification_ttl]
+        ads:
+          type: object
+          properties:
+            tenant_fields:
+              type: array
+              items: {type: string}
+            disclosure:
+              type: object
+              properties:
+                label: {type: string}
+                vendor_name: {type: boolean}
+                disclosure_link: {type: string}
+              required: [label, vendor_name, disclosure_link]
+            max_slots: {type: integer, minimum: 1}
+            min_relevance_floor: {type: number, minimum: 0, maximum: 1}
+            reserve_bounds:
+              type: object
+              properties:
+                min_minor: {type: integer, format: int64}
+                max_minor: {type: integer, format: int64}
+              required: [min_minor, max_minor]
+            per_plan:
+              type: object
+              additionalProperties: true
+          required: [tenant_fields, disclosure, max_slots, min_relevance_floor, reserve_bounds]
       required: [auth]
     Plan:
       type: object

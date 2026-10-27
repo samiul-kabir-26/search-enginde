@@ -20,6 +20,7 @@ import (
 	"github.com/go-redis/redis_rate/v10"
 	"github.com/oklog/ulid/v2"
 
+	"github.com/zavisoft/search-engine/internal/ads"
 	"github.com/zavisoft/search-engine/internal/auth"
 	"github.com/zavisoft/search-engine/internal/pipeline"
 	"github.com/zavisoft/search-engine/internal/pipeline/filter"
@@ -76,7 +77,9 @@ type Service struct {
 	Events EventSink
 	// Vendors stores PUT /v1/vendors updates (nil disables).
 	Vendors VendorStore
-	Log     *slog.Logger
+	// AdsPacing manages ad budget pacing and clearing price settlement (nil disables).
+	AdsPacing ads.Pacing
+	Log       *slog.Logger
 }
 
 // Routes registers the search routes behind bearer auth.
@@ -332,6 +335,7 @@ func (s *Service) servePaged(ctx context.Context, w http.ResponseWriter, p auth.
 		if !ok {
 			return nil, false
 		}
+		q.RequestID = requestID
 		q.Depth, q.Explain = max(res.Plan.MaxPageDepth, page.Size), explain
 		shadowQ := *q
 		start := time.Now()

@@ -140,11 +140,17 @@ func TestBYOControlPlane(t *testing.T) {
 	})
 
 	t.Run("models", func(t *testing.T) {
+		kind := errorCodes(owner.expect(http.StatusBadRequest, owner.do("POST", base+"/models", map[string]any{
+			"kind": "ranker", "type": "onnx", "name": "m",
+		}), "unknown kind"))
+		if kind["/kind"] == "" {
+			t.Errorf("missing error at /kind: %v", kind)
+		}
 		codes := errorCodes(owner.expect(http.StatusBadRequest, owner.do("POST", base+"/models", map[string]any{
-			"kind": "rank", "type": "onnx", "name": "", "version": "1", "artifact_uri": "s3://x",
+			"kind": "embedder", "type": "onnx", "name": "", "version": "1", "upload_id": "x",
 			"input_schema": map[string]any{"modality": "audio"}, "output_schema": map[string]any{"dim": 0},
 		}), "invalid model"))
-		for _, p := range []string{"/kind", "/type", "/name", "/artifact_uri", "/input_schema/modality", "/output_schema/dim"} {
+		for _, p := range []string{"/type", "/name", "/upload_id", "/input_schema/modality", "/output_schema/dim"} {
 			if codes[p] == "" {
 				t.Errorf("missing error at %s: %v", p, codes)
 			}
@@ -315,7 +321,8 @@ func TestBYOControlPlane(t *testing.T) {
 			t.Errorf("starter = %s", f.raw)
 		}
 		pm := e.client().expect(http.StatusOK, e.client().do("GET", "/v1/platform/models", nil), "platform models")
-		if len(pm.body["items"].([]any)) != 2 {
+		// Two embedders and the two learned scorers (M7).
+		if len(pm.body["items"].([]any)) != 4 {
 			t.Errorf("platform models = %s", pm.raw)
 		}
 	})

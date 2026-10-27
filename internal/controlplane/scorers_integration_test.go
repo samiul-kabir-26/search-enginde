@@ -146,7 +146,8 @@ func TestLearnedScorersAndPolicies(t *testing.T) {
 		}
 		rr := owner.do("POST", base+"/models", map[string]any{"kind": "rerank", "type": "onnx", "name": "r", "version": "1", "upload_id": uploadID,
 			"input_schema": map[string]any{"features": features}})
-		if errorCodes(owner.expect(http.StatusBadRequest, rr, "rerank"))["/kind"] != "not_available" {
+		// Re-rankers are remote only (M8): an ONNX re-ranker is refused.
+		if errorCodes(owner.expect(http.StatusBadRequest, rr, "rerank"))["/type"] != "invalid" {
 			t.Errorf("rerank = %s", rr.raw)
 		}
 	})

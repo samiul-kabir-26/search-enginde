@@ -259,3 +259,22 @@ func TestResolverShadowPinnedAndReconcile(t *testing.T) {
 		t.Error("a bad reference must fail")
 	}
 }
+
+func TestAdsAdminLimits(t *testing.T) {
+	lim := AdsLimits{MaxSlots: 2, MinRelevanceFloor: 0.2, MinReserveMinor: 5, MaxReserveMinor: 100}
+	deps := ValidationDeps{Plan: growth, PlatformEmbedder: platformModels, Ads: lim}
+
+	c := defaultConfig(t)
+	c.Ads.Enabled, c.Ads.Slots, c.Ads.RelevanceFloor, c.Ads.ReserveCPCMinor = true, []int{1, 2}, 0.2, 5
+	if errs := c.Validate(context.Background(), deps); len(errs) > 0 {
+		t.Fatalf("config within the admin limits is invalid: %+v", errs)
+	}
+
+	c.Ads.Slots, c.Ads.RelevanceFloor, c.Ads.ReserveCPCMinor = []int{1, 2, 3}, 0.1, 500
+	got := codes(c.Validate(context.Background(), deps))
+	for _, path := range []string{"/ads/slots", "/ads/relevance_floor", "/ads/reserve_cpc_minor"} {
+		if got[path] != "out_of_range" {
+			t.Errorf("%s: code %q, want out_of_range (all: %v)", path, got[path], got)
+		}
+	}
+}

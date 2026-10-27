@@ -106,7 +106,8 @@ func (s *Shadow) Maybe(res *tenant.Resolved, q pipeline.Query, primary []pipelin
 			s.Log.Warn("shadow providers unavailable", "tenant", sh.Tenant.ID, "version", sh.ConfigVersion, "err", err)
 			return
 		}
-		q.ConfigVersion, q.BaseFilter, q.Explain = sh.ConfigVersion, sh.AlwaysFilters, false
+		// No request ID: the shadow run must not record ad prices under the live request's.
+		q.ConfigVersion, q.BaseFilter, q.Explain, q.RequestID = sh.ConfigVersion, sh.AlwaysFilters, false, ""
 		if q.Facets != nil {
 			q.Facets = facetRequests(sh.Config)
 		}

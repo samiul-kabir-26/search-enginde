@@ -150,7 +150,10 @@ func run(ctx context.Context, o options) error {
 	if err := publish(ctx, cfg.KafkaBrokers, tid, products, imageURL, log); err != nil {
 		return err
 	}
-	return publishVendors(ctx, cfg.KafkaBrokers, tid, filepath.Join(o.dataDir, "vendors.jsonl"), log)
+	if err := publishVendors(ctx, cfg.KafkaBrokers, tid, filepath.Join(o.dataDir, "vendors.jsonl"), log); err != nil {
+		return err
+	}
+	return seedCampaigns(ctx, db, tid, filepath.Join(o.dataDir, "campaigns.jsonl"), log)
 }
 
 // canonicalProduct is one row of data/products.canonical.jsonl (tools/dataprep/synthesize.py).
@@ -571,4 +574,115 @@ func publishFile(ctx context.Context, cl *kgo.Client, file string, encode func([
 		return n, fmt.Errorf("%s: %w", file, err)
 	}
 	return n, nil
+}
+
+type canonicalCreative struct {
+	ID        string `json:"id"`
+	ProductID string `json:"product_id"`
+}
+
+type canonicalCampaign struct {
+	ID               string              `json:"id"`
+	VendorID         string              `json:"vendor_id"`
+	Status           string              `json:"status"`
+	DailyBudgetMinor int64               `json:"daily_budget_minor"`
+	Currency         string              `json:"currency"`
+	BidMinor         int64               `json:"bid_minor"`
+	Targeting        json.RawMessage     `json:"targeting"`
+	StartAt          string              `json:"start_at"`
+	EndAt            *string             `json:"end_at,omitempty"`
+	Creatives        []canonicalCreative `json:"creatives"`
+}
+
+func seedCampaigns(ctx context.Context, db *sql.DB, tid tenant.ID, path string, log *slog.Logger) error {
+	f, err := os.Open(path) //nolint:gosec // operator-supplied dataset path
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Info("no campaigns dataset found; skipping ads seed", "path", path)
+			return nil
+		}
+		return fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	q := tenantdb.New(db)
+	existing, err := q.ListAdCampaigns(ctx, tenantdb.ListAdCampaignsParams{
+		TenantID: tid.String(),
+		Limit:    1,
+	})
+	if err == nil && len(existing) > 0 {
+		log.Info("campaigns already seeded", "tenant", tid.String())
+		return nil
+	}
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 1<<20), 16<<20)
+	var campaignsCount, creativesCount int
+
+	for sc.Scan() {
+		var c canonicalCampaign
+		if err := json.Unmarshal(sc.Bytes(), &c); err != nil {
+			return fmt.Errorf("decode campaign: %w", err)
+		}
+		if c.ID == "" {
+			c.ID = tenant.NewID().String()
+		}
+		if c.Status == "" {
+			c.Status = "active"
+		}
+		if c.Currency == "" {
+			c.Currency = "USD"
+		}
+		startAt, err := time.Parse(time.RFC3339, c.StartAt)
+		if err != nil {
+			startAt = time.Now().UTC()
+		}
+		var endAt sql.NullTime
+		if c.EndAt != nil && *c.EndAt != "" {
+			if t, err := time.Parse(time.RFC3339, *c.EndAt); err == nil {
+				endAt = sql.NullTime{Time: t, Valid: true}
+			}
+		}
+		targeting := c.Targeting
+		if len(targeting) == 0 {
+			targeting = json.RawMessage("{}")
+		}
+
+		if err := q.CreateAdCampaign(ctx, tenantdb.CreateAdCampaignParams{
+			ID:               c.ID,
+			TenantID:         tid.String(),
+			VendorID:         c.VendorID,
+			Status:           c.Status,
+			DailyBudgetMinor: c.DailyBudgetMinor,
+			Currency:         c.Currency,
+			BidMinor:         c.BidMinor,
+			Targeting:        targeting,
+			StartAt:          startAt,
+			EndAt:            endAt,
+		}); err != nil {
+			return fmt.Errorf("create ad campaign %s: %w", c.ID, err)
+		}
+		campaignsCount++
+
+		for _, cr := range c.Creatives {
+			crID := cr.ID
+			if crID == "" {
+				crID = tenant.NewID().String()
+			}
+			if err := q.CreateAdCreative(ctx, tenantdb.CreateAdCreativeParams{
+				ID:         crID,
+				CampaignID: c.ID,
+				ProductID:  cr.ProductID,
+			}); err != nil {
+				return fmt.Errorf("create ad creative %s: %w", crID, err)
+			}
+			creativesCount++
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+
+	log.Info("ad campaigns and creatives seeded", "tenant", tid.String(), "campaigns", campaignsCount, "creatives", creativesCount)
+	return nil
 }

@@ -69,12 +69,41 @@ func (s *Service) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if !s.resolved(w, p, err) || !s.admit(ctx, w, res, "events", res.Plan.EventsRPS, events.MaxBatchSize, len(evs)) {
 		return
 	}
+	s.settleSponsoredClicks(ctx, p.Tenant, evs, time.Now())
 	if err := s.Events.Produce(ctx, p.Tenant, evs); err != nil {
 		s.Log.Error("produce events", "tenant", p.Tenant, "events", len(evs), "err", err)
 		platform.WriteProblem(w, platform.Problem{Status: http.StatusServiceUnavailable, Detail: "event ingestion is unavailable; retry the batch"})
 		return
 	}
 	platform.WriteJSON(w, http.StatusAccepted, EventsResponse{Accepted: len(evs)})
+}
+
+// settleSponsoredClicks charges sponsored clicks at the clearing price recorded when the ad was
+// served (CPC, PLAN.md R10) and sets it as the click's value_minor, which the ads report sums.
+// The value is the platform's, never the client's: a sponsored click without a recorded
+// placement (expired, or never served) carries no value.
+func (s *Service) settleSponsoredClicks(ctx context.Context, tid tenant.ID, evs []events.Event, now time.Time) {
+	if s.AdsPacing == nil {
+		return
+	}
+	for i := range evs {
+		e := &evs[i]
+		if e.Type != events.TypeClick || !e.Sponsored {
+			continue
+		}
+		e.ValueMinor = nil
+		if e.RequestID == "" {
+			continue
+		}
+		_, price, ok, err := s.AdsPacing.Charge(ctx, tid, e.RequestID, e.ProductID, now)
+		if err != nil {
+			s.Log.Warn("settle sponsored click", "tenant", tid, "err", err)
+			continue
+		}
+		if ok {
+			e.ValueMinor = &price
+		}
+	}
 }
 
 // VendorsRequest is the body of PUT /v1/vendors.

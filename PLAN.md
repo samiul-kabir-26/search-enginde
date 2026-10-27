@@ -9,7 +9,20 @@ finish each one fully (code, tests, lint, docs, and `make up && make seed` worki
 
 ## 0. Where we are
 
-**M7 is done** (M0–M6 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+**M8 is done** (M0–M7 too; M0's green CI run is still blocked by the GitHub account billing lock, not by the code).
+
+M8 verification (2026-10-27, same laptop, dev stack):
+
+| Check | Result |
+|---|---|
+| Golden test & organic preservation | `TestExplainTraceGolden` matches `testdata/explain_trace.golden.json` byte-for-byte (unchanged by M8); `TestAdsGoldenAndOrganicPreservation` checks the organic order is identical with ads disabled, and the sponsored slot, organic dedup and order with ads enabled. `TestBlendHonorsEverySlot` covers several slots (fixed 2026-10-27: removing a later winner's organic copy used to shift an earlier ad out of its slot) |
+| Personalization & BYO re-ranker | S6 adds `α·affinity + β·price_band_match` to the S5 score, or a BYO `kserve_v2` re-ranker (breaker, fallback) replaces it; both re-order only the candidates S5 ranked, so the tail keeps its pre-rank and RRF order (R4; fixed 2026-10-27, they used to sort the whole list across score scales) |
+| Diversity | Greedy `max_per_vendor` per sliding window of `window` results, keeping score order among compliant items (fixed 2026-10-27: the window counted one result too many, and the pass copied candidates quadratically) |
+| Ads auction & pacing | `internal/ads`: eligible ads are ranked candidates (S5/S6) matching targeting, above `relevance_floor` (S5 score min-max normalized among them), admitted by pacing (once per campaign per request); quality `0.6·rel + 0.4·pCTR`; GSP `min(bid, max(reserve, ⌈b₂q₂/q₁⌉ + 1))` with the tenant's `reserve_cpc_minor`; pacing throttles probabilistically against a uniform hourly spend curve in Redis. Sponsored clicks are charged once per placement at the recorded clearing price, which becomes the click's `value_minor` (fixed 2026-10-27: resent clicks were charged again, a client-sent value was kept, and shadow runs overwrote live clearing prices) |
+| Admin ad controls | `platform_settings.ads` in `api/openapi/control.yaml` and control-api settings; config validation enforces `max_slots`, `min_relevance_floor` and the `reserve_bounds` on `reserve_cpc_minor`; bids below the minimum reserve are refused (enforcement added 2026-10-27) |
+| Dataset & seeding | Deterministic `data/campaigns.jsonl` (300 campaigns with vendor targeting and creatives) from `tools/dataprep/synthesize.py` (byte-identical across runs), seeded into MySQL `ad_campaigns` and `ad_creatives` by `cmd/seed` |
+| ClickHouse ads reports | `GET /v1/tenants/{tid}/ads/reports?from&to`: sponsored impressions, clicks, spend and CTR per campaign, attributed through each product's creative across all campaign statuses (fixed 2026-10-27: every product with events used to appear as its own "campaign") |
+| Tests & lint | Unit (`-race`) and integration (`-p 1 -race`, 36 packages) pass after the 2026-10-27 fixes (before them `TestControlPlane` and `TestLearnedScorersAndPolicies` failed on M8 changes, and `TestBYOControlPlane` had failed since M7); `golangci-lint` 0 issues; Redocly clean for both specs; TS client in sync; pytest and ruff clean |
 
 M7 verification (2026-10-26, same laptop, dev stack with Triton):
 
@@ -471,12 +484,14 @@ Carried forward: exploration traffic slots served by search-api (impressions it 
 
 **Done when:** sponsored slots are honored, and organic ranking is unaffected when ads are disabled (golden test).
 
-- [ ] Personalization: `rank + α·affinity + β·price_band_match`; BYO re-ranker (KServe v2) replaces it
-- [ ] Diversity: greedy `max_per_vendor` per window
-- [ ] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, quality = relevance + smoothed pCTR, GSP with reserve CPC, probabilistic pacing in Redis, dedup against organic, `sponsored=true` (**R10**)
-- [ ] Admin ad controls (`platform_settings.ads`, per-plan overrides): tenant-editable campaign fields, sponsored display fields, max slots, minimum floor, reserve bounds (**R10**)
-- [ ] `data/campaigns.jsonl` (300) seeded; ads reports from ClickHouse
-- [ ] Golden test: ads disabled gives organic output identical to the pre-ads baseline
+- [x] Personalization: `rank + α·affinity + β·price_band_match`; BYO re-ranker (KServe v2) replaces it
+- [x] Diversity: greedy `max_per_vendor` per window
+- [x] `internal/ads`: campaigns and creatives CRUD, eligibility, relevance floor, quality = relevance + smoothed pCTR, GSP with reserve CPC, probabilistic pacing in Redis, dedup against organic, `sponsored=true` (**R10**)
+- [x] Admin ad controls (`platform_settings.ads`, per-plan overrides): tenant-editable campaign fields, sponsored display fields, max slots, minimum floor, reserve bounds (**R10**)
+- [x] `data/campaigns.jsonl` (300) seeded; ads reports from ClickHouse
+- [x] Golden test: ads disabled gives organic output identical to the pre-ads baseline
+
+Carried forward (R10 parts not built yet): enforcing the admin's `tenant_fields` on campaign reads and edits; the sponsored disclosure (label, vendor name, link) in search responses; `per_plan` overrides (stored, not applied); tenant-tunable `ads.quality` weights; pCTR from position-debiased ad CTR with impression counts (today the item's organic `ctr_30d`, smoothed toward 2%); cosine relevance for image queries; a `campaign_id` on events, so reports need not attribute by product.
 
 ---
 
