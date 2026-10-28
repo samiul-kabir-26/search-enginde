@@ -7,6 +7,40 @@ similar-item search through a pluggable six-stage pipeline, with per-tenant BYO 
 - **Spec:** [`PROJECT.md`](PROJECT.md) and [`docs/`](docs/)
 - **Plan and status:** [`PLAN.md`](PLAN.md)
 
+## Tech stack
+
+| Area | Technology |
+|---|---|
+| Services | Go 1.27 (`search-api`, `control-api`, `indexer`, `featurejob`, `seed`), REST (OpenAPI) + gRPC |
+| Lexical search | OpenSearch 3.9 |
+| Vector search | Qdrant 1.20 (default); BYO pgvector and Milvus adapters |
+| Relational store | MySQL 8.4 (migrations + sqlc) |
+| Cache, online features, pub/sub | Redis 7.4 |
+| Event streaming | Redpanda (Kafka API, franz-go client) |
+| Analytics and events | ClickHouse 26.8 |
+| Object storage | SeaweedFS (S3 API) |
+| Model serving | NVIDIA Triton 26.09 (KServe v2 / Open Inference Protocol, ONNX + Python backends); ONNX Runtime in-process |
+| Ranking rules | CEL (policy boosts and filters) |
+| Secrets | HashiCorp Vault KV v2 (BYO provider secrets) |
+| ML tooling | Python 3.12 (uv): PyTorch, Transformers, ONNX, LightGBM, scikit-learn, onnxmltools |
+| Onboarding UI | Next.js 16, React 19, TypeScript, Tailwind CSS 4, Playwright |
+| Observability | OpenTelemetry, Jaeger, Prometheus, Grafana |
+| Edge, email, load tests | nginx, Mailpit (dev SMTP), k6 |
+| Tooling | Docker Compose, Make, buf, sqlc, golangci-lint, Redocly, testcontainers |
+
+## Models
+
+Platform defaults (details in [`docs/MODELS.md`](docs/MODELS.md)); tenants can bring their own via KServe v2
+or OpenAI-compatible embedding endpoints, or upload ONNX scorers.
+
+| ID | Model | Dim | Use |
+|---|---|---|---|
+| `clip-vit-b32` | [`laion/CLIP-ViT-B-32-laion2B-s34B-b79K`](https://huggingface.co/laion/CLIP-ViT-B-32-laion2B-s34B-b79K) | 512 | Image embeddings, text→image via the text tower |
+| `bge-small-en-v1.5` | [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) | 384 | Text semantic retrieval |
+| `prerank-gbdt-v1` | LightGBM lambdarank → ONNX (`make train`) | n/a | Pre-rank, in-process ONNX Runtime |
+| `rank-gbdt-v1` | LightGBM lambdarank → ONNX (`make train`) | n/a | Rank, served by Triton |
+| `default_linear` | Weighted linear scorer | n/a | Baseline ranker before learned models are trained |
+
 ## Prerequisites
 
 Docker with Compose v2, GNU Make, Go (any version ≥ 1.21; the pinned 1.27.3 toolchain downloads
